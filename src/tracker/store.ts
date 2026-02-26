@@ -15,6 +15,8 @@ export interface TrackedPosition {
   tokenAAmount: string;
   tokenBAmount: string;
   entryValueSol: number;
+  /** SOL/USDT price at entry time (from Binance feed) */
+  entrySolPrice?: number;
   openedAt: string;
   txSignature: string;
   status: "open" | "closed";

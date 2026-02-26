@@ -7,7 +7,7 @@ import { ParsedAlert } from "./telegram/parser";
 import { getWallet, getWalletBalance } from "./solana/wallet";
 import { getPoolByAddress, findPoolForToken } from "./meteora/pools";
 import { openPosition } from "./meteora/positions";
-import { checkCanOpenPosition, monitorPositions, closeAllPositions } from "./risk/manager";
+import { checkCanOpenPosition, monitorPositions, closeAllPositions, setFeedManager } from "./risk/manager";
 import {
   addPosition,
   getOpenPositions,
@@ -15,9 +15,11 @@ import {
   getTotalPnl,
   getTotalExposureSol,
 } from "./tracker/store";
+import { FeedManager } from "./feeds/manager";
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let telegramBot: TelegramBot;
+let feedManager: FeedManager;
 
 /**
  * Handle an incoming alert: find pool, check risk, open position.
@@ -92,7 +94,8 @@ async function processPool(poolAddress: PublicKey): Promise<void> {
 
     const result = await openPosition(pool, maxTokenA, maxTokenB);
 
-    // Track the position
+    // Track the position (record SOL price at entry for P&L calculation)
+    const entrySolPrice = feedManager.getSolPrice() ?? undefined;
     const tracked = addPosition({
       poolAddress: poolAddress.toBase58(),
       positionAddress: result.positionAddress.toBase58(),
@@ -102,6 +105,7 @@ async function processPool(poolAddress: PublicKey): Promise<void> {
       tokenAAmount: result.tokenAAmount.toString(),
       tokenBAmount: result.tokenBAmount.toString(),
       entryValueSol: positionSizeSol,
+      entrySolPrice,
       openedAt: new Date().toISOString(),
       txSignature: result.txSignature,
     });
@@ -168,6 +172,8 @@ function registerAdminCommands(): void {
     const totalPnl = getTotalPnl();
     const exposure = getTotalExposureSol();
 
+    const feedStatus = feedManager.getStatusSummary();
+
     await ctx.reply(
       `📊 <b>Bot Status</b>\n\n` +
         `💰 Balance: ${balance.toFixed(4)} SOL\n` +
@@ -176,7 +182,8 @@ function registerAdminCommands(): void {
         `📉 Gesamt P&L: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL\n` +
         `⚙️ Max Position: ${config.risk.maxPositionSizeSol} SOL\n` +
         `🛑 Stop-Loss: -${config.risk.stopLossPercent}%\n` +
-        `🎯 Take-Profit: +${config.risk.takeProfitPercent}%`,
+        `🎯 Take-Profit: +${config.risk.takeProfitPercent}%\n\n` +
+        `<b>Feeds:</b>\n<pre>${feedStatus}</pre>`,
       { parse_mode: "HTML" }
     );
   });
@@ -232,6 +239,32 @@ function registerAdminCommands(): void {
     );
   });
 
+  // /feeds - Show feed connection status and prices
+  telegramBot.registerCommand("feeds", async (ctx) => {
+    const status = feedManager.getStatus();
+    const solPrice = feedManager.getSolPrice();
+
+    let msg = `📡 <b>Feed Status</b>\n\n`;
+    msg += `Binance: ${status.binance ? "🟢 Connected" : "🔴 Disconnected"}\n`;
+    if (solPrice) {
+      msg += `SOL/USDT: <b>$${solPrice.toFixed(2)}</b>\n`;
+    }
+    msg += `\nPolymarket: ${status.polymarket ? "🟢 Connected" : "🔴 Disconnected"}\n`;
+
+    const markets = feedManager.getAllMarkets();
+    if (markets.length > 0) {
+      msg += `\n<b>Märkte (${markets.length}):</b>\n`;
+      for (const m of markets) {
+        const outcomes = Object.entries(m.outcomes)
+          .map(([name, prob]) => `${name}: ${(prob * 100).toFixed(0)}%`)
+          .join(" / ");
+        msg += `\n${m.question}\n  ${outcomes}\n  Vol: $${(m.volume / 1e6).toFixed(1)}M\n`;
+      }
+    }
+
+    await ctx.reply(msg, { parse_mode: "HTML" });
+  });
+
   // /history - Show closed positions
   telegramBot.registerCommand("history", async (ctx) => {
     const allPos = getAllPositions().filter((p) => p.status === "closed");
@@ -272,6 +305,21 @@ async function main(): Promise<void> {
     logger.warn("Low wallet balance! Consider adding more SOL.");
   }
 
+  // Initialize price feeds (Binance + Polymarket)
+  feedManager = new FeedManager({
+    binance: {
+      symbols: config.feeds.binance.symbols,
+      wsUrl: config.feeds.binance.wsUrl,
+      proxyUrl: config.feeds.binance.proxyUrl || undefined,
+    },
+    polymarket: {
+      markets: config.feeds.polymarket.markets,
+      intervalSeconds: config.feeds.polymarket.intervalSeconds,
+    },
+  });
+  setFeedManager(feedManager);
+  await feedManager.start();
+
   // Initialize Telegram bot
   telegramBot = new TelegramBot();
   telegramBot.onAlert(handleAlert);
@@ -287,6 +335,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     logger.info(`Received ${signal}, shutting down...`);
     stopMonitor();
+    await feedManager.stop();
     await telegramBot.stop();
     process.exit(0);
   };

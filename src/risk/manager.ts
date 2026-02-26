@@ -11,6 +11,16 @@ import { getPoolByAddress } from "../meteora/pools";
 import { closePosition } from "../meteora/positions";
 import { getWalletBalance } from "../solana/wallet";
 import { logger } from "../utils/logger";
+import { FeedManager } from "../feeds/manager";
+
+let feedManager: FeedManager | null = null;
+
+/**
+ * Inject the feed manager for real price lookups.
+ */
+export function setFeedManager(fm: FeedManager): void {
+  feedManager = fm;
+}
 
 export interface RiskCheck {
   allowed: boolean;
@@ -197,22 +207,26 @@ export async function closeAllPositions(): Promise<string[]> {
 
 /**
  * Estimate the current SOL value of a tracked position.
- * This is a simplified estimation — production code would use
- * on-chain position data and current pool prices.
+ * Uses Binance CEX price when available, falls back to entry value.
  */
 async function estimatePositionValue(
   tracked: TrackedPosition,
   pool: any
 ): Promise<number | null> {
   try {
-    // Get the current sqrt price from the pool
-    // Compare with the entry sqrt price (which we'd ideally store)
-    // For simplicity: use the entry value as a baseline
-    // A proper implementation would fetch the position's current liquidity share
-    // and calculate the value based on current pool state.
-    //
-    // Placeholder: return entry value (will be improved when on-chain
-    // position querying is refined)
+    // If we have a CEX feed, use SOL/USDT price to estimate value change
+    if (feedManager) {
+      const currentSolPrice = feedManager.getSolPrice();
+      if (currentSolPrice && tracked.entrySolPrice) {
+        // Price ratio: how much SOL price changed since entry
+        const priceRatio = currentSolPrice / tracked.entrySolPrice;
+        // For an LP position, impermanent loss means the value doesn't track
+        // 1:1 with price, but this is a reasonable approximation
+        return tracked.entryValueSol * priceRatio;
+      }
+    }
+
+    // Fallback: use entry value (no price data available)
     return tracked.entryValueSol;
   } catch {
     return null;

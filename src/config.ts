@@ -43,5 +43,25 @@ export const config = {
   monitor: {
     intervalSeconds: parseInt(optional("MONITOR_INTERVAL_SECONDS", "30"), 10),
   },
+  feeds: {
+    binance: {
+      symbols: optional("BINANCE_SYMBOLS", "solusdt")
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean),
+      wsUrl: optional("BINANCE_WS_URL", "wss://stream.binance.com:9443"),
+      proxyUrl: optional("PROXY_URL", ""),
+    },
+    polymarket: {
+      markets: optional("POLYMARKET_MARKETS", "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+      intervalSeconds: parseInt(
+        optional("POLYMARKET_INTERVAL_SECONDS", "30"),
+        10
+      ),
+    },
+  },
   logLevel: optional("LOG_LEVEL", "info"),
 };

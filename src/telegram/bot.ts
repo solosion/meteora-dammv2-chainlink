@@ -145,7 +145,9 @@ export class TelegramBot {
           "/status - Bot-Status anzeigen\n" +
           "/positions - Offene Positionen anzeigen\n" +
           "/balance - Wallet-Balance anzeigen\n" +
+          "/feeds - Price Feed Status (Binance + Polymarket)\n" +
           "/closeall - Alle Positionen schließen\n" +
+          "/history - Geschlossene Positionen anzeigen\n" +
           "/help - Diese Hilfe anzeigen",
         { parse_mode: "HTML" }
       );
