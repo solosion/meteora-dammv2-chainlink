@@ -41,6 +41,10 @@ export const config = {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
+    allowedTokenSuffixes: optional("ALLOWED_TOKEN_SUFFIXES", "pump,bonk")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
   },
   monitor: {
     intervalSeconds: parseInt(optional("MONITOR_INTERVAL_SECONDS", "30"), 10),

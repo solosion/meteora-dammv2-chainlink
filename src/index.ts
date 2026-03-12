@@ -63,6 +63,25 @@ async function handleAlert(alert: ParsedAlert): Promise<void> {
     }
 
     const md = mcapCheck.marketData!;
+
+    // Step 1b: Check token suffix filter (only pump/bonk tokens)
+    const symbolLower = md.symbol.toLowerCase();
+    const nameLower = md.name.toLowerCase();
+    const allowedSuffixes = config.alertParser.allowedTokenSuffixes;
+    if (allowedSuffixes.length > 0) {
+      const matchesSuffix = allowedSuffixes.some(
+        (suffix) => symbolLower.endsWith(suffix) || nameLower.endsWith(suffix)
+      );
+      if (!matchesSuffix) {
+        await telegramBot.notifyAdmin(
+          `🚫 <b>Token-Filter</b>\n` +
+            `Token: ${md.symbol} (${md.name})\n` +
+            `Nur Tokens mit Suffix [${allowedSuffixes.join(", ")}] erlaubt`
+        );
+        continue;
+      }
+    }
+
     await telegramBot.notifyAdmin(
       `✅ <b>Market Cap OK</b>\n` +
         `Token: ${md.symbol} (${md.name})\n` +
