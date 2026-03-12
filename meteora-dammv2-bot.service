@@ -1,0 +1,30 @@
+[Unit]
+Description=Meteora DAMM v2 Alert Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/opt/meteora-dammv2-bot
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/meteora-dammv2-bot/.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=meteora-bot
+
+# Sicherheit
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/meteora-dammv2-bot/data
+
+[Install]
+WantedBy=multi-user.target
