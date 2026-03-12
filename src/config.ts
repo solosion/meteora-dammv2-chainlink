@@ -20,7 +20,6 @@ export const config = {
   },
   telegram: {
     botToken: required("TELEGRAM_BOT_TOKEN"),
-    alertChatId: required("TELEGRAM_ALERT_CHAT_ID"),
     adminChatId: required("TELEGRAM_ADMIN_CHAT_ID"),
   },
   risk: {
@@ -30,23 +29,13 @@ export const config = {
     maxMarketCapUsd: parseFloat(optional("MAX_MARKET_CAP_USD", "1000000")),
     minLiquidityUsd: parseFloat(optional("MIN_LIQUIDITY_USD", "5000")),
   },
-  alertParser: {
-    tokenRegex: optional(
-      "ALERT_TOKEN_REGEX",
-      "[1-9A-HJ-NP-Za-km-z]{32,44}"
-    ),
-    allowedSenders: optional("ALERT_ALLOWED_SENDERS", "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean),
+  watcher: {
+    enabled: optional("POOL_WATCHER_ENABLED", "true") === "true",
+    pollIntervalSeconds: parseInt(optional("POOL_WATCHER_INTERVAL_SECONDS", "5"), 10),
     allowedTokenSuffixes: optional("ALLOWED_TOKEN_SUFFIXES", "pump,bonk")
       .split(",")
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),
-  },
-  watcher: {
-    enabled: optional("POOL_WATCHER_ENABLED", "true") === "true",
-    pollIntervalSeconds: parseInt(optional("POOL_WATCHER_INTERVAL_SECONDS", "5"), 10),
   },
   monitor: {
     intervalSeconds: parseInt(optional("MONITOR_INTERVAL_SECONDS", "30"), 10),

@@ -3,9 +3,8 @@ import BN from "bn.js";
 import { config } from "./config";
 import { logger } from "./utils/logger";
 import { TelegramBot } from "./telegram/bot";
-import { ParsedAlert } from "./telegram/parser";
 import { getWallet, getWalletBalance } from "./solana/wallet";
-import { getPoolByAddress, findPoolForToken } from "./meteora/pools";
+import { getPoolByAddress } from "./meteora/pools";
 import { openPosition } from "./meteora/positions";
 import { checkCanOpenPosition, monitorPositions, closeAllPositions } from "./risk/manager";
 import {
@@ -17,7 +16,6 @@ import {
   getPositionsSummary,
 } from "./tracker/store";
 import { checkMarketCapEligibility, getTokenMarketData } from "./market/marketcap";
-import { searchPoolsByToken } from "./meteora/dataapi";
 import { PoolWatcher, NewPoolEvent } from "./watcher/poolwatcher";
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
@@ -25,113 +23,8 @@ let telegramBot: TelegramBot;
 let poolWatcher: PoolWatcher | null = null;
 
 /**
- * Handle an incoming alert: check market cap, find pool, check risk, open position.
- */
-async function handleAlert(alert: ParsedAlert): Promise<void> {
-  logger.info("Processing alert", {
-    tokens: alert.tokenMints.map((t) => t.toBase58()),
-    pool: alert.poolAddress?.toBase58(),
-  });
-
-  // If a pool address was provided directly, use it (skip market cap check for direct pool)
-  if (alert.poolAddress) {
-    await processPool(alert.poolAddress);
-    return;
-  }
-
-  // Otherwise, check market cap and search for pools for each token mint
-  for (const tokenMint of alert.tokenMints) {
-    const mintStr = tokenMint.toBase58();
-
-    // Step 1: Check Market Cap
-    const mcapCheck = await checkMarketCapEligibility(
-      mintStr,
-      config.risk.maxMarketCapUsd
-    );
-
-    if (!mcapCheck.eligible) {
-      const mcapInfo = mcapCheck.marketData
-        ? `\nToken: ${mcapCheck.marketData.symbol} (${mcapCheck.marketData.name})\n` +
-          `Market Cap: $${formatUsd(mcapCheck.marketData.marketCap)}\n` +
-          `Preis: $${mcapCheck.marketData.priceUsd}\n` +
-          `Liquidität: $${formatUsd(mcapCheck.marketData.liquidity)}`
-        : "";
-
-      await telegramBot.notifyAdmin(
-        `🚫 <b>Market Cap Check fehlgeschlagen</b>\n` +
-          `Token: <code>${mintStr}</code>${mcapInfo}\n` +
-          `Grund: ${mcapCheck.reason}`
-      );
-      continue;
-    }
-
-    const md = mcapCheck.marketData!;
-
-    // Step 1b: Check token suffix filter (only pump/bonk tokens)
-    const symbolLower = md.symbol.toLowerCase();
-    const nameLower = md.name.toLowerCase();
-    const allowedSuffixes = config.alertParser.allowedTokenSuffixes;
-    if (allowedSuffixes.length > 0) {
-      const matchesSuffix = allowedSuffixes.some(
-        (suffix) => symbolLower.endsWith(suffix) || nameLower.endsWith(suffix)
-      );
-      if (!matchesSuffix) {
-        await telegramBot.notifyAdmin(
-          `🚫 <b>Token-Filter</b>\n` +
-            `Token: ${md.symbol} (${md.name})\n` +
-            `Nur Tokens mit Suffix [${allowedSuffixes.join(", ")}] erlaubt`
-        );
-        continue;
-      }
-    }
-
-    await telegramBot.notifyAdmin(
-      `✅ <b>Market Cap OK</b>\n` +
-        `Token: ${md.symbol} (${md.name})\n` +
-        `Market Cap: $${formatUsd(md.marketCap)} (Grenzwert: $${formatUsd(config.risk.maxMarketCapUsd)})\n` +
-        `Preis: $${md.priceUsd}\n` +
-        `Liquidität: $${formatUsd(md.liquidity)}\n` +
-        `24h Volume: $${formatUsd(md.volume24h)}`
-    );
-
-    // Step 2: Check minimum liquidity
-    if (md.liquidity < config.risk.minLiquidityUsd) {
-      await telegramBot.notifyAdmin(
-        `🚫 <b>Liquidität zu gering</b>\n` +
-          `Token: ${md.symbol}\n` +
-          `Liquidität: $${formatUsd(md.liquidity)} (Min: $${formatUsd(config.risk.minLiquidityUsd)})`
-      );
-      continue;
-    }
-
-    // Step 3: Find DAMM v2 pool - first try Data API, then SDK fallback
-    let poolAddress: PublicKey | null = null;
-
-    const apiPools = await searchPoolsByToken(mintStr);
-    if (apiPools.length > 0) {
-      logger.info(`Found ${apiPools.length} pool(s) via Data API for ${md.symbol}`);
-      poolAddress = new PublicKey(apiPools[0].address);
-    } else {
-      // Fallback to SDK-based pool search
-      const sdkPool = await findPoolForToken(tokenMint);
-      if (sdkPool) {
-        poolAddress = sdkPool.address;
-      }
-    }
-
-    if (poolAddress) {
-      await processPool(poolAddress, md.symbol);
-    } else {
-      await telegramBot.notifyAdmin(
-        `⚠️ Kein DAMM v2 Pool gefunden für ${md.symbol} (<code>${mintStr}</code>)`
-      );
-    }
-  }
-}
-
-/**
  * Handle a new pool detected by the on-chain watcher.
- * Runs the same filters as Telegram alerts: suffix, market cap, liquidity.
+ * Runs filters: suffix, market cap, liquidity, then opens position.
  */
 async function handleNewPool(event: NewPoolEvent): Promise<void> {
   const poolStr = event.poolAddress.toBase58();
@@ -196,7 +89,7 @@ async function handleNewPool(event: NewPoolEvent): Promise<void> {
   const md = mcapCheck.marketData!;
 
   // Step 2: Token suffix filter
-  const allowedSuffixes = config.alertParser.allowedTokenSuffixes;
+  const allowedSuffixes = config.watcher.allowedTokenSuffixes;
   if (allowedSuffixes.length > 0) {
     const symbolLower = md.symbol.toLowerCase();
     const nameLower = md.name.toLowerCase();
@@ -493,9 +386,8 @@ async function main(): Promise<void> {
     logger.warn("Low wallet balance! Consider adding more SOL.");
   }
 
-  // Initialize Telegram bot
+  // Initialize Telegram bot (admin commands only)
   telegramBot = new TelegramBot();
-  telegramBot.onAlert(handleAlert);
   registerAdminCommands();
 
   // Start bot

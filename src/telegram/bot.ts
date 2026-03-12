@@ -1,25 +1,14 @@
 import { Telegraf, Context } from "telegraf";
 import { config } from "../config";
 import { logger } from "../utils/logger";
-import { parseAlertMessage, ParsedAlert } from "./parser";
-
-export type AlertHandler = (alert: ParsedAlert) => Promise<void>;
 
 export class TelegramBot {
   private bot: Telegraf;
-  private alertHandlers: AlertHandler[] = [];
   private isRunning = false;
 
   constructor() {
     this.bot = new Telegraf(config.telegram.botToken);
     this.setupHandlers();
-  }
-
-  /**
-   * Register a handler that will be called when a valid alert is detected.
-   */
-  onAlert(handler: AlertHandler): void {
-    this.alertHandlers.push(handler);
   }
 
   /**
@@ -50,7 +39,7 @@ export class TelegramBot {
     logger.info("Telegram bot started");
 
     await this.notifyAdmin(
-      "🟢 <b>Bot gestartet</b>\nMeteora DAMM v2 Alert Bot ist online und wartet auf Alerts."
+      "🟢 <b>Bot gestartet</b>\nMeteora DAMM v2 Pool-Watcher ist online."
     );
   }
 
@@ -61,7 +50,7 @@ export class TelegramBot {
     if (!this.isRunning) return;
 
     await this.notifyAdmin(
-      "🔴 <b>Bot gestoppt</b>\nMeteora DAMM v2 Alert Bot wird heruntergefahren."
+      "🔴 <b>Bot gestoppt</b>\nMeteora DAMM v2 Pool-Watcher wird heruntergefahren."
     );
 
     this.bot.stop("SIGTERM");
@@ -70,62 +59,18 @@ export class TelegramBot {
   }
 
   private setupHandlers(): void {
-    // Listen to all messages from the alert channel
+    // Handle admin messages
     this.bot.on("message", async (ctx: Context) => {
       try {
         const chatId = ctx.chat?.id?.toString();
-        const senderId = ctx.from?.id?.toString() || "unknown";
+        if (chatId !== config.telegram.adminChatId) return;
 
-        // Only process messages from the alert channel
-        if (chatId !== config.telegram.alertChatId) {
-          // Handle admin commands from admin chat
-          if (chatId === config.telegram.adminChatId) {
-            await this.handleAdminMessage(ctx);
-          }
-          return;
-        }
-
-        // Extract text from message
-        const text = this.extractText(ctx);
-        if (!text) return;
-
-        logger.debug("Received alert channel message", {
-          chatId,
-          senderId,
-          text: text.substring(0, 100),
-        });
-
-        // Parse the alert
-        const alert = parseAlertMessage(text, senderId);
-        if (!alert) return;
-
-        // Notify admin about incoming alert
-        await this.notifyAdmin(
-          `📨 <b>Alert empfangen</b>\n` +
-            `Token(s): ${alert.tokenMints.map((t) => `<code>${t.toBase58()}</code>`).join(", ")}\n` +
-            (alert.poolAddress
-              ? `Pool: <code>${alert.poolAddress.toBase58()}</code>\n`
-              : "") +
-            `Von: ${senderId}`
-        );
-
-        // Call all registered alert handlers
-        for (const handler of this.alertHandlers) {
-          try {
-            await handler(alert);
-          } catch (err) {
-            logger.error("Alert handler failed", { error: String(err) });
-            await this.notifyAdmin(
-              `⚠️ <b>Alert Handler Fehler</b>\n<code>${String(err)}</code>`
-            );
-          }
-        }
+        await this.handleAdminMessage(ctx);
       } catch (err) {
         logger.error("Error processing message", { error: String(err) });
       }
     });
 
-    // Error handling
     this.bot.catch((err: any) => {
       logger.error("Telegram bot error", { error: String(err) });
     });
@@ -138,7 +83,7 @@ export class TelegramBot {
     const command = text.trim().toLowerCase();
 
     if (command === "/status") {
-      await ctx.reply("🟢 Bot ist aktiv und wartet auf Alerts.");
+      await ctx.reply("🟢 Bot ist aktiv. Pool-Watcher läuft.");
     } else if (command === "/help") {
       await ctx.reply(
         "📋 <b>Verfügbare Befehle:</b>\n\n" +
@@ -152,7 +97,6 @@ export class TelegramBot {
         { parse_mode: "HTML" }
       );
     }
-    // Other commands are handled by the main orchestrator via command registration
   }
 
   /**
@@ -163,7 +107,6 @@ export class TelegramBot {
     handler: (ctx: Context) => Promise<void>
   ): void {
     this.bot.command(command, async (ctx) => {
-      // Only allow admin
       if (ctx.chat?.id?.toString() !== config.telegram.adminChatId) return;
       await handler(ctx);
     });
