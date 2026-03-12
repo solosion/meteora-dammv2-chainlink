@@ -3,7 +3,7 @@
 #
 # Setup:
 #   1. Bot klonen und bauen:
-#      git clone <repo-url> /opt/meteora-dammv2-bot
+#      git clone https://github.com/solosion/meteora-dammv2-chainlink.git /opt/meteora-dammv2-bot
 #      cd /opt/meteora-dammv2-bot && npm install && npm run build
 #
 #   2. .env anlegen:
