@@ -14,6 +14,7 @@ import {
   getAllPositions,
   getTotalPnl,
   getTotalExposureSol,
+  getPositionsSummary,
 } from "./tracker/store";
 import { checkMarketCapEligibility, getTokenMarketData } from "./market/marketcap";
 import { searchPoolsByToken } from "./meteora/dataapi";
@@ -198,8 +199,7 @@ async function processPool(poolAddress: PublicKey, tokenSymbol?: string): Promis
         `Pool: <code>${poolAddress.toBase58()}</code>\n` +
         `Position: <code>${result.positionAddress.toBase58()}</code>\n` +
         `Größe: ${positionSizeSol} SOL\n` +
-        `TX: <code>${result.txSignature}</code>\n` +
-        `Stop-Loss: -${config.risk.stopLossPercent}% | Take-Profit: +${config.risk.takeProfitPercent}%`
+        `TX: <code>${result.txSignature}</code>`
     );
   } catch (err) {
     logger.error("Failed to open position", { error: String(err) });
@@ -221,9 +221,8 @@ function startMonitor(): void {
     try {
       const result = await monitorPositions();
 
-      // Send alerts to admin
-      for (const alert of result.alerts) {
-        await telegramBot.notifyAdmin(alert);
+      for (const update of result.updates) {
+        await telegramBot.notifyAdmin(update);
       }
     } catch (err) {
       logger.error("Monitor loop error", { error: String(err) });
@@ -262,31 +261,15 @@ function registerAdminCommands(): void {
         `📉 Gesamt P&L: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL\n` +
         `⚙️ Max Position: ${config.risk.maxPositionSizeSol} SOL\n` +
         `📊 Max Market Cap: $${formatUsd(config.risk.maxMarketCapUsd)}\n` +
-        `💧 Min Liquidität: $${formatUsd(config.risk.minLiquidityUsd)}\n` +
-        `🛑 Stop-Loss: -${config.risk.stopLossPercent}%\n` +
-        `🎯 Take-Profit: +${config.risk.takeProfitPercent}%`,
+        `💧 Min Liquidität: $${formatUsd(config.risk.minLiquidityUsd)}`,
       { parse_mode: "HTML" }
     );
   });
 
-  // /positions - Show open positions
+  // /positions - Show open positions with live P&L
   telegramBot.registerCommand("positions", async (ctx) => {
-    const openPos = getOpenPositions();
-    if (openPos.length === 0) {
-      await ctx.reply("📭 Keine offenen Positionen.");
-      return;
-    }
-
-    let msg = `📋 <b>Offene Positionen (${openPos.length})</b>\n\n`;
-    for (const pos of openPos) {
-      msg +=
-        `<b>${pos.id}</b>\n` +
-        `  Pool: <code>${pos.poolAddress.substring(0, 12)}...</code>\n` +
-        `  Größe: ${pos.entryValueSol} SOL\n` +
-        `  Eröffnet: ${new Date(pos.openedAt).toLocaleString("de-DE")}\n\n`;
-    }
-
-    await ctx.reply(msg, { parse_mode: "HTML" });
+    const summary = getPositionsSummary();
+    await ctx.reply(summary, { parse_mode: "HTML" });
   });
 
   // /balance - Show wallet balance

@@ -26,8 +26,6 @@ export const config = {
   risk: {
     maxPositionSizeSol: parseFloat(optional("MAX_POSITION_SIZE_SOL", "0.5")),
     maxTotalExposureSol: parseFloat(optional("MAX_TOTAL_EXPOSURE_SOL", "5.0")),
-    stopLossPercent: parseFloat(optional("STOP_LOSS_PERCENT", "20")),
-    takeProfitPercent: parseFloat(optional("TAKE_PROFIT_PERCENT", "50")),
     maxOpenPositions: parseInt(optional("MAX_OPEN_POSITIONS", "10"), 10),
     maxMarketCapUsd: parseFloat(optional("MAX_MARKET_CAP_USD", "1000000")),
     minLiquidityUsd: parseFloat(optional("MIN_LIQUIDITY_USD", "5000")),

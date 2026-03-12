@@ -5,6 +5,7 @@ import {
   getTotalExposureSol,
   getOpenPositions,
   closeTrackedPosition,
+  updatePositionValue,
   TrackedPosition,
 } from "../tracker/store";
 import { getPoolByAddress } from "../meteora/pools";
@@ -25,7 +26,6 @@ export interface RiskCheck {
 export async function checkCanOpenPosition(
   positionSizeSol: number
 ): Promise<RiskCheck> {
-  // Check max open positions
   const openCount = getOpenPositionCount();
   if (openCount >= config.risk.maxOpenPositions) {
     return {
@@ -34,7 +34,6 @@ export async function checkCanOpenPosition(
     };
   }
 
-  // Check position size limit
   if (positionSizeSol > config.risk.maxPositionSizeSol) {
     return {
       allowed: false,
@@ -42,7 +41,6 @@ export async function checkCanOpenPosition(
     };
   }
 
-  // Check total exposure
   const currentExposure = getTotalExposureSol();
   if (currentExposure + positionSizeSol > config.risk.maxTotalExposureSol) {
     return {
@@ -51,7 +49,6 @@ export async function checkCanOpenPosition(
     };
   }
 
-  // Check wallet balance (keep at least 0.05 SOL for fees)
   const balance = await getWalletBalance();
   const minReserve = 0.05;
   if (balance - positionSizeSol < minReserve) {
@@ -65,18 +62,16 @@ export async function checkCanOpenPosition(
 }
 
 export interface MonitorResult {
-  closedPositions: TrackedPosition[];
-  alerts: string[];
+  updates: string[];
 }
 
 /**
- * Monitor open positions for stop-loss and take-profit conditions.
- * This is called periodically by the main loop.
+ * Monitor open positions: update current values and P&L for tracking.
+ * No automatic closing — positions are only closed manually via /closeall.
  */
 export async function monitorPositions(): Promise<MonitorResult> {
   const openPositions = getOpenPositions();
-  const closedPositions: TrackedPosition[] = [];
-  const alerts: string[] = [];
+  const updates: string[] = [];
 
   for (const tracked of openPositions) {
     try {
@@ -85,75 +80,21 @@ export async function monitorPositions(): Promise<MonitorResult> {
       );
 
       if (!pool) {
-        alerts.push(
+        updates.push(
           `⚠️ Pool ${tracked.poolAddress.substring(0, 8)}... nicht erreichbar`
         );
         continue;
       }
 
-      // Estimate current value based on pool price changes
-      // This is a simplified P&L calculation
-      const entryValue = tracked.entryValueSol;
-      // In a real scenario, we'd calculate the current value of the position
-      // by checking the current pool state and our share of liquidity.
-      // For now, we use a simplified approach based on pool metrics.
-      const currentValue = await estimatePositionValue(tracked, pool);
+      const currentValue = await estimatePositionValue(tracked);
 
-      if (currentValue === null) continue;
+      if (currentValue !== null) {
+        const pnlSol = currentValue - tracked.entryValueSol;
+        const pnlPercent =
+          ((currentValue - tracked.entryValueSol) / tracked.entryValueSol) *
+          100;
 
-      const pnlPercent =
-        ((currentValue - entryValue) / entryValue) * 100;
-
-      // Check stop-loss
-      if (pnlPercent <= -config.risk.stopLossPercent) {
-        logger.warn("Stop-Loss triggered", {
-          position: tracked.id,
-          pnlPercent: pnlPercent.toFixed(2),
-        });
-
-        try {
-          const sig = await closePosition(
-            pool,
-            new PublicKey(tracked.positionAddress),
-            new PublicKey(tracked.positionNftMint)
-          );
-          const pnlSol = currentValue - entryValue;
-          closeTrackedPosition(tracked.id, sig, "stop-loss", pnlSol);
-          closedPositions.push(tracked);
-          alerts.push(
-            `🔴 Stop-Loss: Position ${tracked.id} geschlossen (${pnlPercent.toFixed(1)}%, ${pnlSol.toFixed(4)} SOL)`
-          );
-        } catch (err) {
-          alerts.push(
-            `⚠️ Stop-Loss fehlgeschlagen für ${tracked.id}: ${String(err)}`
-          );
-        }
-      }
-
-      // Check take-profit
-      if (pnlPercent >= config.risk.takeProfitPercent) {
-        logger.info("Take-Profit triggered", {
-          position: tracked.id,
-          pnlPercent: pnlPercent.toFixed(2),
-        });
-
-        try {
-          const sig = await closePosition(
-            pool,
-            new PublicKey(tracked.positionAddress),
-            new PublicKey(tracked.positionNftMint)
-          );
-          const pnlSol = currentValue - entryValue;
-          closeTrackedPosition(tracked.id, sig, "take-profit", pnlSol);
-          closedPositions.push(tracked);
-          alerts.push(
-            `🟢 Take-Profit: Position ${tracked.id} geschlossen (+${pnlPercent.toFixed(1)}%, +${pnlSol.toFixed(4)} SOL)`
-          );
-        } catch (err) {
-          alerts.push(
-            `⚠️ Take-Profit fehlgeschlagen für ${tracked.id}: ${String(err)}`
-          );
-        }
+        updatePositionValue(tracked.id, currentValue, pnlSol, pnlPercent);
       }
     } catch (err) {
       logger.error(`Error monitoring position ${tracked.id}`, {
@@ -162,7 +103,7 @@ export async function monitorPositions(): Promise<MonitorResult> {
     }
   }
 
-  return { closedPositions, alerts };
+  return { updates };
 }
 
 /**
@@ -187,7 +128,13 @@ export async function closeAllPositions(): Promise<string[]> {
         new PublicKey(tracked.positionAddress),
         new PublicKey(tracked.positionNftMint)
       );
-      closeTrackedPosition(tracked.id, sig, "manual-close-all");
+
+      const currentValue = await estimatePositionValue(tracked);
+      const pnlSol = currentValue
+        ? currentValue - tracked.entryValueSol
+        : undefined;
+
+      closeTrackedPosition(tracked.id, sig, "manual-close-all", pnlSol);
       results.push(`✅ ${tracked.id} geschlossen`);
     } catch (err) {
       results.push(`❌ ${tracked.id}: ${String(err)}`);
@@ -199,16 +146,13 @@ export async function closeAllPositions(): Promise<string[]> {
 
 /**
  * Estimate the current SOL value of a tracked position.
- * Uses the DAMM v2 Data API for position data and DexScreener for token prices.
  */
 async function estimatePositionValue(
-  tracked: TrackedPosition,
-  pool: any
+  tracked: TrackedPosition
 ): Promise<number | null> {
   try {
     const wallet = getWallet();
 
-    // Try to get position data from the Data API
     const apiPositions = await getWalletOpenPositions(
       wallet.publicKey.toBase58(),
       tracked.poolAddress
@@ -219,7 +163,6 @@ async function estimatePositionValue(
     );
 
     if (apiPos) {
-      // Get current token prices to estimate USD value, then convert to SOL
       const tokenAData = await getTokenMarketData(tracked.tokenAMint);
       const tokenBData = await getTokenMarketData(tracked.tokenBMint);
 
@@ -228,7 +171,6 @@ async function estimatePositionValue(
           apiPos.tokenAAmount * tokenAData.priceUsd +
           apiPos.tokenBAmount * tokenBData.priceUsd;
 
-        // Get SOL price for conversion
         const solData = await getTokenMarketData(
           "So11111111111111111111111111111111111111112"
         );
@@ -238,7 +180,6 @@ async function estimatePositionValue(
       }
     }
 
-    // Fallback: return entry value
     return tracked.entryValueSol;
   } catch (err) {
     logger.debug("Position value estimation fallback to entry value", {
