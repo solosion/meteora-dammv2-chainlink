@@ -18,9 +18,11 @@ import {
 } from "./tracker/store";
 import { checkMarketCapEligibility, getTokenMarketData } from "./market/marketcap";
 import { searchPoolsByToken } from "./meteora/dataapi";
+import { PoolWatcher, NewPoolEvent } from "./watcher/poolwatcher";
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let telegramBot: TelegramBot;
+let poolWatcher: PoolWatcher | null = null;
 
 /**
  * Handle an incoming alert: check market cap, find pool, check risk, open position.
@@ -125,6 +127,112 @@ async function handleAlert(alert: ParsedAlert): Promise<void> {
       );
     }
   }
+}
+
+/**
+ * Handle a new pool detected by the on-chain watcher.
+ * Runs the same filters as Telegram alerts: suffix, market cap, liquidity.
+ */
+async function handleNewPool(event: NewPoolEvent): Promise<void> {
+  const poolStr = event.poolAddress.toBase58();
+  logger.info("New DAMM v2 pool detected by watcher", { pool: poolStr });
+
+  // Determine the non-SOL token to check
+  const WSOL = "So11111111111111111111111111111111111111112";
+  const tokenAStr = event.tokenAMint.toBase58();
+  const tokenBStr = event.tokenBMint.toBase58();
+
+  // Pick the non-SOL token for market data checks
+  let targetMint = tokenAStr;
+  if (tokenAStr === WSOL && tokenBStr !== WSOL) {
+    targetMint = tokenBStr;
+  } else if (tokenBStr === WSOL && tokenAStr !== WSOL) {
+    targetMint = tokenAStr;
+  } else if (tokenAStr === PublicKey.default.toBase58()) {
+    // Could not extract token mints — try to load pool state
+    const pool = await getPoolByAddress(event.poolAddress);
+    if (pool) {
+      const a = pool.tokenAMint.toBase58();
+      const b = pool.tokenBMint.toBase58();
+      targetMint = a === WSOL ? b : a;
+    } else {
+      await telegramBot.notifyAdmin(
+        `🔍 Neuer Pool erkannt aber Token-Mints unbekannt\n` +
+          `Pool: <code>${poolStr}</code>\n` +
+          `TX: <code>${event.txSignature}</code>`
+      );
+      return;
+    }
+  }
+
+  await telegramBot.notifyAdmin(
+    `🔍 <b>Neuer DAMM v2 Pool erkannt!</b>\n` +
+      `Pool: <code>${poolStr}</code>\n` +
+      `Token: <code>${targetMint}</code>\n` +
+      `TX: <code>${event.txSignature}</code>\n` +
+      `Prüfe Filter...`
+  );
+
+  // Step 1: Get market data
+  const mcapCheck = await checkMarketCapEligibility(
+    targetMint,
+    config.risk.maxMarketCapUsd
+  );
+
+  if (!mcapCheck.eligible) {
+    const mcapInfo = mcapCheck.marketData
+      ? `\nToken: ${mcapCheck.marketData.symbol} (${mcapCheck.marketData.name})\n` +
+        `Market Cap: $${formatUsd(mcapCheck.marketData.marketCap)}\n` +
+        `Grund: ${mcapCheck.reason}`
+      : `\nGrund: ${mcapCheck.reason}`;
+
+    await telegramBot.notifyAdmin(
+      `🚫 <b>Pool-Watcher: Market Cap Check fehlgeschlagen</b>\n` +
+        `Pool: <code>${poolStr}</code>${mcapInfo}`
+    );
+    return;
+  }
+
+  const md = mcapCheck.marketData!;
+
+  // Step 2: Token suffix filter
+  const allowedSuffixes = config.alertParser.allowedTokenSuffixes;
+  if (allowedSuffixes.length > 0) {
+    const symbolLower = md.symbol.toLowerCase();
+    const nameLower = md.name.toLowerCase();
+    const matchesSuffix = allowedSuffixes.some(
+      (suffix) => symbolLower.endsWith(suffix) || nameLower.endsWith(suffix)
+    );
+    if (!matchesSuffix) {
+      await telegramBot.notifyAdmin(
+        `🚫 <b>Pool-Watcher: Token-Filter</b>\n` +
+          `Token: ${md.symbol} (${md.name})\n` +
+          `Nur Tokens mit Suffix [${allowedSuffixes.join(", ")}] erlaubt`
+      );
+      return;
+    }
+  }
+
+  // Step 3: Liquidity check
+  if (md.liquidity < config.risk.minLiquidityUsd) {
+    await telegramBot.notifyAdmin(
+      `🚫 <b>Pool-Watcher: Liquidität zu gering</b>\n` +
+        `Token: ${md.symbol}\n` +
+        `Liquidität: $${formatUsd(md.liquidity)} (Min: $${formatUsd(config.risk.minLiquidityUsd)})`
+    );
+    return;
+  }
+
+  await telegramBot.notifyAdmin(
+    `✅ <b>Pool-Watcher: Alle Filter bestanden!</b>\n` +
+      `Token: ${md.symbol} (${md.name})\n` +
+      `Market Cap: $${formatUsd(md.marketCap)}\n` +
+      `Liquidität: $${formatUsd(md.liquidity)}\n` +
+      `Eröffne Position...`
+  );
+
+  // Step 4: Open position
+  await processPool(event.poolAddress, md.symbol);
 }
 
 function formatUsd(n: number): string {
@@ -396,10 +504,19 @@ async function main(): Promise<void> {
   // Start position monitor
   startMonitor();
 
+  // Start on-chain pool watcher
+  if (config.watcher.enabled) {
+    poolWatcher = new PoolWatcher();
+    poolWatcher.onNewPool(handleNewPool);
+    poolWatcher.start();
+    logger.info("On-chain pool watcher enabled");
+  }
+
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info(`Received ${signal}, shutting down...`);
     stopMonitor();
+    poolWatcher?.stop();
     await telegramBot.stop();
     process.exit(0);
   };

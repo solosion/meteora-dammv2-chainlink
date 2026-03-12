@@ -44,6 +44,10 @@ export const config = {
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),
   },
+  watcher: {
+    enabled: optional("POOL_WATCHER_ENABLED", "true") === "true",
+    pollIntervalSeconds: parseInt(optional("POOL_WATCHER_INTERVAL_SECONDS", "5"), 10),
+  },
   monitor: {
     intervalSeconds: parseInt(optional("MONITOR_INTERVAL_SECONDS", "30"), 10),
   },
