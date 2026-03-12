@@ -1,4 +1,5 @@
 import { PublicKey, ConfirmedSignatureInfo } from "@solana/web3.js";
+import bs58 from "bs58";
 import { getConnection } from "../solana/connection";
 import { logger } from "../utils/logger";
 import { config } from "../config";
@@ -177,7 +178,7 @@ export class PoolWatcher {
         // Check if it's a compiled instruction with data
         if ("data" in ix && typeof ix.data === "string") {
           // The data is base58 encoded; decode the first 8 bytes to check discriminator
-          const dataBytes = Buffer.from(ix.data, "base64");
+          const dataBytes = Buffer.from(bs58.decode(ix.data));
           const discriminator = dataBytes.subarray(0, 8).toString("hex");
 
           if (discriminator === INITIALIZE_POOL_DISCRIMINATOR) {
@@ -193,7 +194,7 @@ export class PoolWatcher {
         for (const ix of inner.instructions) {
           if ("programId" in ix && ix.programId.equals(DAMM_V2_PROGRAM)) {
             if ("data" in ix && typeof ix.data === "string") {
-              const dataBytes = Buffer.from(ix.data, "base64");
+              const dataBytes = Buffer.from(bs58.decode(ix.data));
               const discriminator = dataBytes.subarray(0, 8).toString("hex");
 
               if (discriminator === INITIALIZE_POOL_DISCRIMINATOR) {
