@@ -9,8 +9,10 @@ import {
 } from "../tracker/store";
 import { getPoolByAddress } from "../meteora/pools";
 import { closePosition } from "../meteora/positions";
-import { getWalletBalance } from "../solana/wallet";
+import { getWalletBalance, getWallet } from "../solana/wallet";
 import { logger } from "../utils/logger";
+import { getWalletOpenPositions } from "../meteora/dataapi";
+import { getTokenMarketData } from "../market/marketcap";
 
 export interface RiskCheck {
   allowed: boolean;
@@ -197,24 +199,52 @@ export async function closeAllPositions(): Promise<string[]> {
 
 /**
  * Estimate the current SOL value of a tracked position.
- * This is a simplified estimation — production code would use
- * on-chain position data and current pool prices.
+ * Uses the DAMM v2 Data API for position data and DexScreener for token prices.
  */
 async function estimatePositionValue(
   tracked: TrackedPosition,
   pool: any
 ): Promise<number | null> {
   try {
-    // Get the current sqrt price from the pool
-    // Compare with the entry sqrt price (which we'd ideally store)
-    // For simplicity: use the entry value as a baseline
-    // A proper implementation would fetch the position's current liquidity share
-    // and calculate the value based on current pool state.
-    //
-    // Placeholder: return entry value (will be improved when on-chain
-    // position querying is refined)
+    const wallet = getWallet();
+
+    // Try to get position data from the Data API
+    const apiPositions = await getWalletOpenPositions(
+      wallet.publicKey.toBase58(),
+      tracked.poolAddress
+    );
+
+    const apiPos = apiPositions.find(
+      (p) => p.positionAddress === tracked.positionAddress
+    );
+
+    if (apiPos) {
+      // Get current token prices to estimate USD value, then convert to SOL
+      const tokenAData = await getTokenMarketData(tracked.tokenAMint);
+      const tokenBData = await getTokenMarketData(tracked.tokenBMint);
+
+      if (tokenAData && tokenBData) {
+        const valueUsd =
+          apiPos.tokenAAmount * tokenAData.priceUsd +
+          apiPos.tokenBAmount * tokenBData.priceUsd;
+
+        // Get SOL price for conversion
+        const solData = await getTokenMarketData(
+          "So11111111111111111111111111111111111111112"
+        );
+        if (solData && solData.priceUsd > 0) {
+          return valueUsd / solData.priceUsd;
+        }
+      }
+    }
+
+    // Fallback: return entry value
     return tracked.entryValueSol;
-  } catch {
-    return null;
+  } catch (err) {
+    logger.debug("Position value estimation fallback to entry value", {
+      position: tracked.id,
+      error: String(err),
+    });
+    return tracked.entryValueSol;
   }
 }

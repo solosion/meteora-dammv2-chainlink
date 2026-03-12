@@ -29,6 +29,8 @@ export const config = {
     stopLossPercent: parseFloat(optional("STOP_LOSS_PERCENT", "20")),
     takeProfitPercent: parseFloat(optional("TAKE_PROFIT_PERCENT", "50")),
     maxOpenPositions: parseInt(optional("MAX_OPEN_POSITIONS", "10"), 10),
+    maxMarketCapUsd: parseFloat(optional("MAX_MARKET_CAP_USD", "1000000")),
+    minLiquidityUsd: parseFloat(optional("MIN_LIQUIDITY_USD", "5000")),
   },
   alertParser: {
     tokenRegex: optional(

@@ -145,7 +145,9 @@ export class TelegramBot {
           "/status - Bot-Status anzeigen\n" +
           "/positions - Offene Positionen anzeigen\n" +
           "/balance - Wallet-Balance anzeigen\n" +
+          "/mcap &lt;token&gt; - Market Cap abfragen\n" +
           "/closeall - Alle Positionen schließen\n" +
+          "/history - Geschlossene Positionen\n" +
           "/help - Diese Hilfe anzeigen",
         { parse_mode: "HTML" }
       );

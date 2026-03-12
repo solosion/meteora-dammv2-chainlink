@@ -15,12 +15,14 @@ import {
   getTotalPnl,
   getTotalExposureSol,
 } from "./tracker/store";
+import { checkMarketCapEligibility, getTokenMarketData } from "./market/marketcap";
+import { searchPoolsByToken } from "./meteora/dataapi";
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let telegramBot: TelegramBot;
 
 /**
- * Handle an incoming alert: find pool, check risk, open position.
+ * Handle an incoming alert: check market cap, find pool, check risk, open position.
  */
 async function handleAlert(alert: ParsedAlert): Promise<void> {
   logger.info("Processing alert", {
@@ -28,29 +30,94 @@ async function handleAlert(alert: ParsedAlert): Promise<void> {
     pool: alert.poolAddress?.toBase58(),
   });
 
-  // If a pool address was provided directly, use it
+  // If a pool address was provided directly, use it (skip market cap check for direct pool)
   if (alert.poolAddress) {
     await processPool(alert.poolAddress);
     return;
   }
 
-  // Otherwise, search for pools for each token mint
+  // Otherwise, check market cap and search for pools for each token mint
   for (const tokenMint of alert.tokenMints) {
-    const pool = await findPoolForToken(tokenMint);
-    if (pool) {
-      await processPool(pool.address);
+    const mintStr = tokenMint.toBase58();
+
+    // Step 1: Check Market Cap
+    const mcapCheck = await checkMarketCapEligibility(
+      mintStr,
+      config.risk.maxMarketCapUsd
+    );
+
+    if (!mcapCheck.eligible) {
+      const mcapInfo = mcapCheck.marketData
+        ? `\nToken: ${mcapCheck.marketData.symbol} (${mcapCheck.marketData.name})\n` +
+          `Market Cap: $${formatUsd(mcapCheck.marketData.marketCap)}\n` +
+          `Preis: $${mcapCheck.marketData.priceUsd}\n` +
+          `Liquidität: $${formatUsd(mcapCheck.marketData.liquidity)}`
+        : "";
+
+      await telegramBot.notifyAdmin(
+        `🚫 <b>Market Cap Check fehlgeschlagen</b>\n` +
+          `Token: <code>${mintStr}</code>${mcapInfo}\n` +
+          `Grund: ${mcapCheck.reason}`
+      );
+      continue;
+    }
+
+    const md = mcapCheck.marketData!;
+    await telegramBot.notifyAdmin(
+      `✅ <b>Market Cap OK</b>\n` +
+        `Token: ${md.symbol} (${md.name})\n` +
+        `Market Cap: $${formatUsd(md.marketCap)} (Grenzwert: $${formatUsd(config.risk.maxMarketCapUsd)})\n` +
+        `Preis: $${md.priceUsd}\n` +
+        `Liquidität: $${formatUsd(md.liquidity)}\n` +
+        `24h Volume: $${formatUsd(md.volume24h)}`
+    );
+
+    // Step 2: Check minimum liquidity
+    if (md.liquidity < config.risk.minLiquidityUsd) {
+      await telegramBot.notifyAdmin(
+        `🚫 <b>Liquidität zu gering</b>\n` +
+          `Token: ${md.symbol}\n` +
+          `Liquidität: $${formatUsd(md.liquidity)} (Min: $${formatUsd(config.risk.minLiquidityUsd)})`
+      );
+      continue;
+    }
+
+    // Step 3: Find DAMM v2 pool - first try Data API, then SDK fallback
+    let poolAddress: PublicKey | null = null;
+
+    const apiPools = await searchPoolsByToken(mintStr);
+    if (apiPools.length > 0) {
+      logger.info(`Found ${apiPools.length} pool(s) via Data API for ${md.symbol}`);
+      poolAddress = new PublicKey(apiPools[0].address);
+    } else {
+      // Fallback to SDK-based pool search
+      const sdkPool = await findPoolForToken(tokenMint);
+      if (sdkPool) {
+        poolAddress = sdkPool.address;
+      }
+    }
+
+    if (poolAddress) {
+      await processPool(poolAddress, md.symbol);
     } else {
       await telegramBot.notifyAdmin(
-        `⚠️ Kein DAMM v2 Pool gefunden für Token <code>${tokenMint.toBase58()}</code>`
+        `⚠️ Kein DAMM v2 Pool gefunden für ${md.symbol} (<code>${mintStr}</code>)`
       );
     }
   }
 }
 
+function formatUsd(n: number): string {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(2)}K`;
+  return n.toFixed(2);
+}
+
 /**
  * Process a specific pool: check risks and open position.
  */
-async function processPool(poolAddress: PublicKey): Promise<void> {
+async function processPool(poolAddress: PublicKey, tokenSymbol?: string): Promise<void> {
   const pool = await getPoolByAddress(poolAddress);
   if (!pool) {
     await telegramBot.notifyAdmin(
@@ -175,6 +242,8 @@ function registerAdminCommands(): void {
         `💵 Exposure: ${exposure.toFixed(4)}/${config.risk.maxTotalExposureSol} SOL\n` +
         `📉 Gesamt P&L: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL\n` +
         `⚙️ Max Position: ${config.risk.maxPositionSizeSol} SOL\n` +
+        `📊 Max Market Cap: $${formatUsd(config.risk.maxMarketCapUsd)}\n` +
+        `💧 Min Liquidität: $${formatUsd(config.risk.minLiquidityUsd)}\n` +
         `🛑 Stop-Loss: -${config.risk.stopLossPercent}%\n` +
         `🎯 Take-Profit: +${config.risk.takeProfitPercent}%`,
       { parse_mode: "HTML" }
@@ -228,6 +297,48 @@ function registerAdminCommands(): void {
     const results = await closeAllPositions();
     await ctx.reply(
       `📋 <b>Ergebnis:</b>\n` + results.join("\n"),
+      { parse_mode: "HTML" }
+    );
+  });
+
+  // /mcap <token> - Check market cap for a token
+  telegramBot.registerCommand("mcap", async (ctx) => {
+    const msg = ctx.message;
+    const text = msg && "text" in msg ? msg.text : "";
+    const parts = text.trim().split(/\s+/);
+    if (parts.length < 2) {
+      await ctx.reply(
+        "Verwendung: /mcap <TOKEN_MINT_ADRESSE>\n" +
+          "Zeigt Market Cap und Preis eines Tokens an.",
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    const tokenMint = parts[1];
+    await ctx.reply("Lade Marktdaten...");
+
+    const marketData = await getTokenMarketData(tokenMint);
+    if (!marketData) {
+      await ctx.reply(
+        `❌ Keine Marktdaten gefunden für <code>${tokenMint}</code>`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    const eligible = marketData.marketCap <= config.risk.maxMarketCapUsd;
+    await ctx.reply(
+      `📊 <b>Marktdaten: ${marketData.symbol}</b>\n\n` +
+        `Token: ${marketData.name}\n` +
+        `Adresse: <code>${tokenMint}</code>\n` +
+        `Preis: $${marketData.priceUsd}\n` +
+        `Market Cap: $${formatUsd(marketData.marketCap)}\n` +
+        `Liquidität: $${formatUsd(marketData.liquidity)}\n` +
+        `24h Volume: $${formatUsd(marketData.volume24h)}\n` +
+        `24h Änderung: ${marketData.priceChange24h >= 0 ? "+" : ""}${marketData.priceChange24h.toFixed(2)}%\n\n` +
+        `Grenzwert: $${formatUsd(config.risk.maxMarketCapUsd)}\n` +
+        `Status: ${eligible ? "✅ Unter Grenzwert" : "🚫 Über Grenzwert"}`,
       { parse_mode: "HTML" }
     );
   });
