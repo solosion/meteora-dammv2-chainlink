@@ -1,14 +1,11 @@
-import { Telegraf } from "telegraf";
 import { config } from "../config";
 import { logger } from "../utils/logger";
 
 const TELEGRAM_API = `https://api.telegram.org/bot${config.telegram.botToken}`;
 
 /**
- * Minimal context object that is compatible with the subset of Telegraf's
- * Context used by the command handlers in this project (ctx.reply, ctx.message,
- * ctx.chat).  This lets callers keep the same handler signatures without
- * pulling in Telegraf's polling machinery.
+ * Minimal context object compatible with the subset of Telegraf's Context used
+ * by command handlers (ctx.reply, ctx.message, ctx.chat).
  */
 interface TgUpdate {
   update_id: number;
@@ -31,11 +28,6 @@ interface MinimalContext {
 }
 
 export class TelegramBot {
-  /**
-   * Telegraf instance kept ONLY for its `telegram.sendMessage` helper.
-   * We never call `bot.launch()`.
-   */
-  private bot: Telegraf;
   private isRunning = false;
   private pollAbort: AbortController | null = null;
   private updateOffset = 0;
@@ -45,10 +37,6 @@ export class TelegramBot {
     handler: (ctx: MinimalContext) => Promise<void>;
   }> = [];
 
-  constructor() {
-    this.bot = new Telegraf(config.telegram.botToken);
-  }
-
   // ── Public API (unchanged signatures) ────────────────────────────
 
   /**
@@ -56,11 +44,11 @@ export class TelegramBot {
    */
   async notifyAdmin(message: string): Promise<void> {
     try {
-      await this.bot.telegram.sendMessage(
-        config.telegram.adminChatId,
-        message,
-        { parse_mode: "HTML" }
-      );
+      await this.apiCall("sendMessage", {
+        chat_id: config.telegram.adminChatId,
+        text: message,
+        parse_mode: "HTML",
+      });
     } catch (err) {
       logger.error("Failed to send admin notification", {
         error: String(err),
@@ -69,11 +57,16 @@ export class TelegramBot {
   }
 
   /**
-   * Start the bot.  Instead of Telegraf's `bot.launch()` (which opens its
-   * own getUpdates loop and causes 409 conflicts when multiple instances
-   * exist), we first clear any stuck Telegram session with a deleteWebhook
-   * + a throwaway getUpdates call, then run our own long-polling loop
-   * using plain `fetch()`.
+   * Start the bot.  Uses plain fetch() long-polling against the Telegram
+   * getUpdates API.  No Telegraf polling is involved, so there is no risk
+   * of 409 "Conflict: terminated by other getUpdates request" errors from
+   * competing Telegraf instances.
+   *
+   * Startup sequence:
+   *  1. deleteWebhook (+ drop pending updates) to clear any webhook config.
+   *  2. A single non-blocking getUpdates with offset=-1 to flush / cancel
+   *     any lingering long-poll session from a previous process.
+   *  3. Enter our own long-poll loop.
    */
   async start(): Promise<void> {
     if (this.isRunning) return;
@@ -81,15 +74,16 @@ export class TelegramBot {
     // 1. Ensure no webhook is set and drop pending updates
     await this.apiCall("deleteWebhook", { drop_pending_updates: true });
 
-    // 2. Flush any lingering getUpdates session by requesting offset -1
-    //    This returns at most the last update and clears the old poll.
+    // 2. Flush any lingering getUpdates session by requesting offset -1.
+    //    This returns at most the last update and cancels the old poll.
     try {
       const flush = await this.apiCall("getUpdates", {
         offset: -1,
         timeout: 0,
       });
       if (flush.ok && flush.result?.length) {
-        this.updateOffset = flush.result[flush.result.length - 1].update_id + 1;
+        this.updateOffset =
+          flush.result[flush.result.length - 1].update_id + 1;
       }
     } catch {
       // Ignore – the important thing is the old session is interrupted
@@ -105,7 +99,7 @@ export class TelegramBot {
       }
     });
 
-    logger.info("Telegram bot started (manual long-polling)");
+    logger.info("Telegram bot started (manual long-polling, no Telegraf)");
 
     await this.notifyAdmin(
       "🟢 <b>Bot gestartet</b>\nMeteora DAMM v2 Pool-Watcher ist online."
@@ -131,8 +125,7 @@ export class TelegramBot {
   /**
    * Register an additional command handler.
    * The handler receives a minimal context object with `.reply()`,
-   * `.message`, and `.chat` – the same subset used by the existing
-   * command handlers in index.ts.
+   * `.message`, and `.chat`.
    */
   registerCommand(
     command: string,
@@ -148,7 +141,11 @@ export class TelegramBot {
       try {
         const data = await this.apiCall(
           "getUpdates",
-          { offset: this.updateOffset, timeout: 30, allowed_updates: ["message"] },
+          {
+            offset: this.updateOffset,
+            timeout: 30,
+            allowed_updates: ["message"],
+          },
           this.pollAbort?.signal
         );
 
@@ -166,11 +163,29 @@ export class TelegramBot {
         // AbortError is expected when stop() is called
         if (err?.name === "AbortError") break;
 
-        logger.error("Telegram getUpdates error, retrying in 5s", {
-          error: String(err),
-        });
-        // Back off before retrying
-        await new Promise((r) => setTimeout(r, 5_000));
+        // 409 = another getUpdates session is active; back off longer
+        const is409 =
+          typeof err?.message === "string" && err.message.includes("409");
+        const backoff = is409 ? 10_000 : 5_000;
+
+        logger.error(
+          `Telegram getUpdates error, retrying in ${backoff / 1000}s`,
+          { error: String(err) }
+        );
+
+        await new Promise((r) => setTimeout(r, backoff));
+
+        // On 409, try to flush the competing session before retrying
+        if (is409) {
+          try {
+            await this.apiCall("deleteWebhook", {
+              drop_pending_updates: false,
+            });
+            await this.apiCall("getUpdates", { offset: -1, timeout: 0 });
+          } catch {
+            // best-effort
+          }
+        }
       }
     }
   }
@@ -204,7 +219,7 @@ export class TelegramBot {
       }
     }
 
-    // Built-in handlers (same as old setupHandlers / handleAdminMessage)
+    // Built-in handlers
     await this.handleBuiltinCommands(ctx, text);
   }
 
@@ -267,7 +282,9 @@ export class TelegramBot {
 
     if (!resp.ok) {
       const body = await resp.text();
-      throw new Error(`Telegram API ${method} failed (${resp.status}): ${body}`);
+      throw new Error(
+        `Telegram API ${method} failed (${resp.status}): ${body}`
+      );
     }
 
     return resp.json();
