@@ -30,9 +30,14 @@ export class TelegramBot {
 
   /**
    * Start the bot.
+   * Clears any stale Telegram polling connection before launching
+   * to prevent 409 "Conflict" errors.
    */
   async start(): Promise<void> {
     if (this.isRunning) return;
+
+    // Drop pending updates and clear any stale getUpdates connection
+    await this.bot.telegram.deleteWebhook({ drop_pending_updates: true });
 
     await this.bot.launch();
     this.isRunning = true;
@@ -45,15 +50,21 @@ export class TelegramBot {
 
   /**
    * Stop the bot gracefully.
+   * Always attempts to stop Telegraf polling, even if isRunning is false,
+   * to ensure the getUpdates connection is released.
    */
   async stop(): Promise<void> {
-    if (!this.isRunning) return;
+    if (this.isRunning) {
+      await this.notifyAdmin(
+        "🔴 <b>Bot gestoppt</b>\nMeteora DAMM v2 Pool-Watcher wird heruntergefahren."
+      );
+    }
 
-    await this.notifyAdmin(
-      "🔴 <b>Bot gestoppt</b>\nMeteora DAMM v2 Pool-Watcher wird heruntergefahren."
-    );
-
-    this.bot.stop("SIGTERM");
+    try {
+      this.bot.stop("SIGTERM");
+    } catch {
+      // Ignore errors during stop — bot may not have been launched
+    }
     this.isRunning = false;
     logger.info("Telegram bot stopped");
   }
