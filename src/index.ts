@@ -307,7 +307,7 @@ function registerAdminCommands(): void {
   // /mcap <token> - Check market cap for a token
   telegramBot.registerCommand("mcap", async (ctx) => {
     const msg = ctx.message;
-    const text = msg && "text" in msg ? msg.text : "";
+    const text = (msg && "text" in msg ? msg.text : "") || "";
     const parts = text.trim().split(/\s+/);
     if (parts.length < 2) {
       await ctx.reply(
