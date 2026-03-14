@@ -5,10 +5,23 @@ import { logger } from "../utils/logger";
 export class TelegramBot {
   private bot: Telegraf;
   private isRunning = false;
+  private commandHandlers: Array<{ command: string; handler: (ctx: Context) => Promise<void> }> = [];
 
   constructor() {
-    this.bot = new Telegraf(config.telegram.botToken);
-    this.setupHandlers();
+    this.bot = this.createBot();
+  }
+
+  private createBot(): Telegraf {
+    const bot = new Telegraf(config.telegram.botToken);
+    this.setupHandlers(bot);
+    // Re-register any previously added command handlers
+    for (const { command, handler } of this.commandHandlers) {
+      bot.command(command, async (ctx) => {
+        if (ctx.chat?.id?.toString() !== config.telegram.adminChatId) return;
+        await handler(ctx);
+      });
+    }
+    return bot;
   }
 
   /**
@@ -41,11 +54,12 @@ export class TelegramBot {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        // Force-clear any stale polling session
-        await this.bot.telegram.callApi("getUpdates", {
-          offset: -1,
-          timeout: 0,
-        });
+        // Create a fresh Telegraf instance for each attempt.
+        // After a failed launch(), Telegraf's internal state is dirty
+        // and retrying on the same instance causes self-conflicts.
+        if (attempt > 1) {
+          this.bot = this.createBot();
+        }
 
         await this.bot.launch({ dropPendingUpdates: true });
         this.isRunning = true;
@@ -62,6 +76,8 @@ export class TelegramBot {
             `Telegram 409 conflict on attempt ${attempt}/${maxRetries}, ` +
             `retrying in ${retryDelaySec}s...`
           );
+          // Stop the broken instance before retrying
+          try { this.bot.stop("SIGTERM"); } catch { /* ignore */ }
           await new Promise((r) => setTimeout(r, retryDelaySec * 1000));
         } else {
           throw err;
@@ -91,9 +107,9 @@ export class TelegramBot {
     logger.info("Telegram bot stopped");
   }
 
-  private setupHandlers(): void {
+  private setupHandlers(bot: Telegraf): void {
     // Handle admin messages
-    this.bot.on("message", async (ctx: Context) => {
+    bot.on("message", async (ctx: Context) => {
       try {
         const chatId = ctx.chat?.id?.toString();
         if (chatId !== config.telegram.adminChatId) return;
@@ -104,7 +120,7 @@ export class TelegramBot {
       }
     });
 
-    this.bot.catch((err: any) => {
+    bot.catch((err: any) => {
       logger.error("Telegram bot error", { error: String(err) });
     });
   }
@@ -139,6 +155,8 @@ export class TelegramBot {
     command: string,
     handler: (ctx: Context) => Promise<void>
   ): void {
+    // Store for re-registration when bot instance is recreated on retry
+    this.commandHandlers.push({ command, handler });
     this.bot.command(command, async (ctx) => {
       if (ctx.chat?.id?.toString() !== config.telegram.adminChatId) return;
       await handler(ctx);
