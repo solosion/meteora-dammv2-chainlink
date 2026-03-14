@@ -29,23 +29,45 @@ export class TelegramBot {
   }
 
   /**
-   * Start the bot.
-   * Clears any stale Telegram polling connection before launching
-   * to prevent 409 "Conflict" errors.
+   * Start the bot with retry logic for 409 "Conflict" errors.
+   * Telegram keeps long-polling connections alive for ~30s after a process dies.
+   * If we get a 409, we wait and retry instead of crashing.
    */
   async start(): Promise<void> {
     if (this.isRunning) return;
 
-    // Drop pending updates and clear any stale getUpdates connection
-    await this.bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    const maxRetries = 5;
+    const retryDelaySec = 10;
 
-    await this.bot.launch();
-    this.isRunning = true;
-    logger.info("Telegram bot started");
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // Force-clear any stale polling session
+        await this.bot.telegram.callApi("getUpdates", {
+          offset: -1,
+          timeout: 0,
+        });
 
-    await this.notifyAdmin(
-      "🟢 <b>Bot gestartet</b>\nMeteora DAMM v2 Pool-Watcher ist online."
-    );
+        await this.bot.launch({ dropPendingUpdates: true });
+        this.isRunning = true;
+        logger.info("Telegram bot started");
+
+        await this.notifyAdmin(
+          "🟢 <b>Bot gestartet</b>\nMeteora DAMM v2 Pool-Watcher ist online."
+        );
+        return;
+      } catch (err) {
+        const is409 = String(err).includes("409");
+        if (is409 && attempt < maxRetries) {
+          logger.warn(
+            `Telegram 409 conflict on attempt ${attempt}/${maxRetries}, ` +
+            `retrying in ${retryDelaySec}s...`
+          );
+          await new Promise((r) => setTimeout(r, retryDelaySec * 1000));
+        } else {
+          throw err;
+        }
+      }
+    }
   }
 
   /**
