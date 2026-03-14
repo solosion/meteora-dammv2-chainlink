@@ -75,23 +75,33 @@ export class TelegramBot {
     // 1. Ensure no webhook is set and drop pending updates
     await this.apiCall("deleteWebhook", { drop_pending_updates: true });
 
-    // 2. Flush any lingering getUpdates session by requesting offset -1.
-    //    This returns at most the last update and cancels the old poll.
-    try {
-      const flush = await this.apiCall("getUpdates", {
-        offset: -1,
-        timeout: 0,
-      });
-      if (flush.ok && flush.result?.length) {
-        this.updateOffset =
-          flush.result[flush.result.length - 1].update_id + 1;
+    // 2. Flush any lingering getUpdates session.  After a hard kill (SIGKILL),
+    //    Telegram may hold the old long-poll open for up to 30s.  We retry
+    //    until the flush succeeds, meaning the old session is truly gone.
+    for (let attempt = 1; attempt <= 10; attempt++) {
+      try {
+        const flush = await this.apiCall("getUpdates", {
+          offset: -1,
+          timeout: 0,
+        });
+        if (flush.ok && flush.result?.length) {
+          this.updateOffset =
+            flush.result[flush.result.length - 1].update_id + 1;
+        }
+        logger.info("Telegram session flush succeeded");
+        break; // Success – old session is gone
+      } catch (err: any) {
+        const is409 = typeof err?.message === "string" && err.message.includes("409");
+        if (is409 && attempt < 10) {
+          const wait = Math.min(5_000 * attempt, 30_000);
+          logger.warn(`Flush attempt ${attempt}/10 got 409, waiting ${wait / 1000}s...`);
+          await new Promise((r) => setTimeout(r, wait));
+        } else {
+          logger.warn("Flush failed, proceeding anyway", { error: String(err) });
+          break;
+        }
       }
-    } catch {
-      // Ignore – the important thing is the old session is interrupted
     }
-
-    // Wait briefly to let Telegram fully release the old polling session
-    await new Promise((r) => setTimeout(r, 2_000));
 
     this.isRunning = true;
     this.pollAbort = new AbortController();
