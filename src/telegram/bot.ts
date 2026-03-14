@@ -31,6 +31,7 @@ export class TelegramBot {
   private isRunning = false;
   private pollAbort: AbortController | null = null;
   private updateOffset = 0;
+  private consecutive409s = 0;
 
   private commandHandlers: Array<{
     command: string;
@@ -88,6 +89,9 @@ export class TelegramBot {
     } catch {
       // Ignore – the important thing is the old session is interrupted
     }
+
+    // Wait briefly to let Telegram fully release the old polling session
+    await new Promise((r) => setTimeout(r, 2_000));
 
     this.isRunning = true;
     this.pollAbort = new AbortController();
@@ -151,6 +155,8 @@ export class TelegramBot {
 
         if (!data.ok || !Array.isArray(data.result)) continue;
 
+        this.consecutive409s = 0; // Reset on successful poll
+
         for (const update of data.result as TgUpdate[]) {
           this.updateOffset = update.update_id + 1;
           try {
@@ -163,28 +169,27 @@ export class TelegramBot {
         // AbortError is expected when stop() is called
         if (err?.name === "AbortError") break;
 
-        // 409 = another getUpdates session is active; back off longer
+        // 409 = another getUpdates session is active; use exponential backoff
         const is409 =
           typeof err?.message === "string" && err.message.includes("409");
-        const backoff = is409 ? 10_000 : 5_000;
 
-        logger.error(
-          `Telegram getUpdates error, retrying in ${backoff / 1000}s`,
-          { error: String(err) }
-        );
-
-        await new Promise((r) => setTimeout(r, backoff));
-
-        // On 409, try to flush the competing session before retrying
         if (is409) {
-          try {
-            await this.apiCall("deleteWebhook", {
-              drop_pending_updates: false,
-            });
-            await this.apiCall("getUpdates", { offset: -1, timeout: 0 });
-          } catch {
-            // best-effort
-          }
+          this.consecutive409s = (this.consecutive409s || 0) + 1;
+          // Exponential backoff: 10s, 20s, 40s, ... capped at 120s
+          const backoff = Math.min(10_000 * Math.pow(2, this.consecutive409s - 1), 120_000);
+
+          logger.warn(
+            `Telegram 409 conflict (attempt ${this.consecutive409s}), waiting ${backoff / 1000}s before retry`,
+          );
+
+          await new Promise((r) => setTimeout(r, backoff));
+        } else {
+          this.consecutive409s = 0;
+          logger.error(
+            `Telegram getUpdates error, retrying in 5s`,
+            { error: String(err) }
+          );
+          await new Promise((r) => setTimeout(r, 5_000));
         }
       }
     }
