@@ -419,7 +419,30 @@ async function main(): Promise<void> {
   logger.info("Bot is running. Waiting for alerts...");
 }
 
-main().catch((err) => {
-  logger.error("Fatal error", { error: String(err) });
+// Graceful shutdown on uncaught errors — stop Telegram bot before exiting
+// to prevent 409 conflicts when the process restarts.
+async function gracefulExit(reason: string, err?: unknown): Promise<void> {
+  logger.error(`${reason}`, { error: err ? String(err) : "unknown" });
+  try {
+    stopMonitor();
+    poolWatcher?.stop();
+    if (telegramBot) await telegramBot.stop();
+  } catch (cleanupErr) {
+    logger.error("Error during cleanup", { error: String(cleanupErr) });
+  }
+  // Give Telegram API time to release the getUpdates connection
+  await new Promise((resolve) => setTimeout(resolve, 2000));
   process.exit(1);
+}
+
+process.on("uncaughtException", (err) => {
+  gracefulExit("Uncaught exception", err);
+});
+
+process.on("unhandledRejection", (reason) => {
+  gracefulExit("Unhandled rejection", reason);
+});
+
+main().catch((err) => {
+  gracefulExit("Fatal error in main()", err);
 });

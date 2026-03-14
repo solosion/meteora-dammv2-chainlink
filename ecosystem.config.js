@@ -10,10 +10,13 @@ module.exports = {
       env: {
         NODE_ENV: "production",
       },
-      // Restart if process uses too much memory or crashes
-      exp_backoff_restart_delay: 1000,
-      max_restarts: 50,
-      restart_delay: 5000,
+      // Conservative restart to avoid Telegram 409 conflicts.
+      // The bot does graceful cleanup on exit (stops Telegram polling),
+      // but we still wait 30s before restart to let Telegram release the connection.
+      exp_backoff_restart_delay: 5000,
+      max_restarts: 10,
+      restart_delay: 30000,
+      kill_timeout: 10000,
       // Logging
       log_date_format: "YYYY-MM-DD HH:mm:ss",
       error_file: "logs/error.log",
