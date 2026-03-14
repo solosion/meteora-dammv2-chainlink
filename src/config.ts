@@ -27,12 +27,12 @@ export const config = {
     maxTotalExposureSol: parseFloat(optional("MAX_TOTAL_EXPOSURE_SOL", "5.0")),
     maxOpenPositions: parseInt(optional("MAX_OPEN_POSITIONS", "10"), 10),
     maxMarketCapUsd: parseFloat(optional("MAX_MARKET_CAP_USD", "1000000")),
-    minLiquidityUsd: parseFloat(optional("MIN_LIQUIDITY_USD", "5000")),
+    minLiquidityUsd: parseFloat(optional("MIN_LIQUIDITY_USD", "0")),
   },
   watcher: {
     enabled: optional("POOL_WATCHER_ENABLED", "true") === "true",
     pollIntervalSeconds: parseInt(optional("POOL_WATCHER_INTERVAL_SECONDS", "5"), 10),
-    allowedTokenSuffixes: optional("ALLOWED_TOKEN_SUFFIXES", "pump,bonk")
+    allowedTokenSuffixes: optional("ALLOWED_TOKEN_SUFFIXES", "")
       .split(",")
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),

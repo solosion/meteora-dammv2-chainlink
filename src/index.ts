@@ -15,7 +15,8 @@ import {
   getTotalExposureSol,
   getPositionsSummary,
 } from "./tracker/store";
-import { checkMarketCapEligibility, getTokenMarketData } from "./market/marketcap";
+import { getTokenMarketData } from "./market/marketcap";
+import { getPoolFromDataApi, DataApiPool } from "./meteora/dataapi";
 import { PoolWatcher, NewPoolEvent } from "./watcher/poolwatcher";
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
@@ -23,109 +24,105 @@ let telegramBot: TelegramBot;
 let poolWatcher: PoolWatcher | null = null;
 
 /**
+ * Fetch pool info from Meteora Data API with retries.
+ * New pools may not be indexed immediately, so we retry a few times.
+ */
+async function fetchPoolDataWithRetry(
+  poolAddress: string,
+  maxRetries: number = 3,
+  delayMs: number = 10_000
+): Promise<DataApiPool | null> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const data = await getPoolFromDataApi(poolAddress);
+    if (data && data.tokenASymbol) {
+      return data;
+    }
+    if (attempt < maxRetries) {
+      logger.info(`Pool not yet on Meteora Data API, retry ${attempt}/${maxRetries} in ${delayMs / 1000}s...`, {
+        pool: poolAddress,
+      });
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  return null;
+}
+
+/**
  * Handle a new pool detected by the on-chain watcher.
- * Runs filters: suffix, market cap, liquidity, then opens position.
+ * Uses Meteora Data API for pool info (token symbols, TVL).
+ * No DexScreener dependency — new pools are checked directly via Meteora.
  */
 async function handleNewPool(event: NewPoolEvent): Promise<void> {
   const poolStr = event.poolAddress.toBase58();
   logger.info("New DAMM v2 pool detected by watcher", { pool: poolStr });
 
-  // Determine the non-SOL token to check
-  const WSOL = "So11111111111111111111111111111111111111112";
-  const tokenAStr = event.tokenAMint.toBase58();
-  const tokenBStr = event.tokenBMint.toBase58();
-
-  // Pick the non-SOL token for market data checks
-  let targetMint = tokenAStr;
-  if (tokenAStr === WSOL && tokenBStr !== WSOL) {
-    targetMint = tokenBStr;
-  } else if (tokenBStr === WSOL && tokenAStr !== WSOL) {
-    targetMint = tokenAStr;
-  } else if (tokenAStr === PublicKey.default.toBase58()) {
-    // Could not extract token mints — try to load pool state
-    const pool = await getPoolByAddress(event.poolAddress);
-    if (pool) {
-      const a = pool.tokenAMint.toBase58();
-      const b = pool.tokenBMint.toBase58();
-      targetMint = a === WSOL ? b : a;
-    } else {
-      await telegramBot.notifyAdmin(
-        `🔍 Neuer Pool erkannt aber Token-Mints unbekannt\n` +
-          `Pool: <code>${poolStr}</code>\n` +
-          `TX: <code>${event.txSignature}</code>`
-      );
-      return;
-    }
-  }
-
   await telegramBot.notifyAdmin(
     `🔍 <b>Neuer DAMM v2 Pool erkannt!</b>\n` +
       `Pool: <code>${poolStr}</code>\n` +
-      `Token: <code>${targetMint}</code>\n` +
       `TX: <code>${event.txSignature}</code>\n` +
-      `Prüfe Filter...`
+      `Lade Pool-Daten von Meteora...`
   );
 
-  // Step 1: Get market data
-  const mcapCheck = await checkMarketCapEligibility(
-    targetMint,
-    config.risk.maxMarketCapUsd
-  );
+  // Step 1: Get pool data from Meteora Data API (with retry for new pools)
+  const poolData = await fetchPoolDataWithRetry(poolStr);
 
-  if (!mcapCheck.eligible) {
-    const mcapInfo = mcapCheck.marketData
-      ? `\nToken: ${mcapCheck.marketData.symbol} (${mcapCheck.marketData.name})\n` +
-        `Market Cap: $${formatUsd(mcapCheck.marketData.marketCap)}\n` +
-        `Grund: ${mcapCheck.reason}`
-      : `\nGrund: ${mcapCheck.reason}`;
+  // Determine token symbols — from Data API or fallback to on-chain mints
+  let tokenSymbol = "???";
+  let poolName = poolStr.substring(0, 8) + "...";
+  let tvl = 0;
 
-    await telegramBot.notifyAdmin(
-      `🚫 <b>Pool-Watcher: Market Cap Check fehlgeschlagen</b>\n` +
-        `Pool: <code>${poolStr}</code>${mcapInfo}`
-    );
-    return;
+  if (poolData) {
+    const WSOL = "So11111111111111111111111111111111111111112";
+    // Pick the non-SOL token symbol for display
+    tokenSymbol =
+      poolData.tokenAAddress === WSOL
+        ? poolData.tokenBSymbol
+        : poolData.tokenASymbol;
+    poolName = poolData.poolName;
+    tvl = poolData.tvl;
+  } else {
+    logger.warn("Pool not found on Meteora Data API after retries, proceeding with on-chain data", {
+      pool: poolStr,
+    });
   }
 
-  const md = mcapCheck.marketData!;
-
-  // Step 2: Token suffix filter
+  // Step 2: Token suffix filter (only if we have token symbols)
   const allowedSuffixes = config.watcher.allowedTokenSuffixes;
-  if (allowedSuffixes.length > 0) {
-    const symbolLower = md.symbol.toLowerCase();
-    const nameLower = md.name.toLowerCase();
+  if (allowedSuffixes.length > 0 && tokenSymbol !== "???") {
+    const symbolLower = tokenSymbol.toLowerCase();
+    const nameLower = poolName.toLowerCase();
     const matchesSuffix = allowedSuffixes.some(
       (suffix) => symbolLower.endsWith(suffix) || nameLower.endsWith(suffix)
     );
     if (!matchesSuffix) {
       await telegramBot.notifyAdmin(
         `🚫 <b>Pool-Watcher: Token-Filter</b>\n` +
-          `Token: ${md.symbol} (${md.name})\n` +
+          `Token: ${tokenSymbol} (${poolName})\n` +
           `Nur Tokens mit Suffix [${allowedSuffixes.join(", ")}] erlaubt`
       );
       return;
     }
   }
 
-  // Step 3: Liquidity check
-  if (md.liquidity < config.risk.minLiquidityUsd) {
+  // Step 3: TVL / Liquiditäts-Check (use Meteora TVL instead of DexScreener liquidity)
+  if (poolData && tvl > 0 && tvl < config.risk.minLiquidityUsd) {
     await telegramBot.notifyAdmin(
-      `🚫 <b>Pool-Watcher: Liquidität zu gering</b>\n` +
-        `Token: ${md.symbol}\n` +
-        `Liquidität: $${formatUsd(md.liquidity)} (Min: $${formatUsd(config.risk.minLiquidityUsd)})`
+      `🚫 <b>Pool-Watcher: TVL zu gering</b>\n` +
+        `Token: ${tokenSymbol}\n` +
+        `TVL: $${formatUsd(tvl)} (Min: $${formatUsd(config.risk.minLiquidityUsd)})`
     );
     return;
   }
 
   await telegramBot.notifyAdmin(
     `✅ <b>Pool-Watcher: Alle Filter bestanden!</b>\n` +
-      `Token: ${md.symbol} (${md.name})\n` +
-      `Market Cap: $${formatUsd(md.marketCap)}\n` +
-      `Liquidität: $${formatUsd(md.liquidity)}\n` +
+      `Token: ${tokenSymbol} (${poolName})\n` +
+      `TVL: $${formatUsd(tvl)}\n` +
       `Eröffne Position...`
   );
 
   // Step 4: Open position
-  await processPool(event.poolAddress, md.symbol);
+  await processPool(event.poolAddress, tokenSymbol);
 }
 
 function formatUsd(n: number): string {

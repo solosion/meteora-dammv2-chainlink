@@ -8,7 +8,7 @@ jest.mock("../config", () => ({
     watcher: {
       enabled: true,
       pollIntervalSeconds: 5,
-      allowedTokenSuffixes: ["pump"],
+      allowedTokenSuffixes: [],
     },
     logLevel: "info",
   },
