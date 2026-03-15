@@ -1,37 +1,55 @@
-import { Telegraf, Context } from "telegraf";
 import { config } from "../config";
 import { logger } from "../utils/logger";
-import { parseAlertMessage, ParsedAlert } from "./parser";
 
-export type AlertHandler = (alert: ParsedAlert) => Promise<void>;
+const TELEGRAM_API = `https://api.telegram.org/bot${config.telegram.botToken}`;
+
+/**
+ * Minimal context object compatible with the subset of Telegraf's Context used
+ * by command handlers (ctx.reply, ctx.message, ctx.chat).
+ */
+interface TgUpdate {
+  update_id: number;
+  message?: TgMessage;
+}
+
+interface TgMessage {
+  message_id: number;
+  chat: { id: number; type: string };
+  text?: string;
+  caption?: string;
+  date: number;
+  from?: { id: number; is_bot: boolean; first_name: string };
+}
+
+interface MinimalContext {
+  message: TgMessage | undefined;
+  chat: { id: number; type: string } | undefined;
+  reply: (text: string, extra?: { parse_mode?: string }) => Promise<void>;
+}
 
 export class TelegramBot {
-  private bot: Telegraf;
-  private alertHandlers: AlertHandler[] = [];
   private isRunning = false;
+  private pollAbort: AbortController | null = null;
+  private updateOffset = 0;
+  private consecutive409s = 0;
 
-  constructor() {
-    this.bot = new Telegraf(config.telegram.botToken);
-    this.setupHandlers();
-  }
+  private commandHandlers: Array<{
+    command: string;
+    handler: (ctx: MinimalContext) => Promise<void>;
+  }> = [];
 
-  /**
-   * Register a handler that will be called when a valid alert is detected.
-   */
-  onAlert(handler: AlertHandler): void {
-    this.alertHandlers.push(handler);
-  }
+  // ── Public API (unchanged signatures) ────────────────────────────
 
   /**
    * Send a message to the admin chat.
    */
   async notifyAdmin(message: string): Promise<void> {
     try {
-      await this.bot.telegram.sendMessage(
-        config.telegram.adminChatId,
-        message,
-        { parse_mode: "HTML" }
-      );
+      await this.apiCall("sendMessage", {
+        chat_id: config.telegram.adminChatId,
+        text: message,
+        parse_mode: "HTML",
+      });
     } catch (err) {
       logger.error("Failed to send admin notification", {
         error: String(err),
@@ -40,17 +58,65 @@ export class TelegramBot {
   }
 
   /**
-   * Start the bot.
+   * Start the bot.  Uses plain fetch() long-polling against the Telegram
+   * getUpdates API.  No Telegraf polling is involved, so there is no risk
+   * of 409 "Conflict: terminated by other getUpdates request" errors from
+   * competing Telegraf instances.
+   *
+   * Startup sequence:
+   *  1. deleteWebhook (+ drop pending updates) to clear any webhook config.
+   *  2. A single non-blocking getUpdates with offset=-1 to flush / cancel
+   *     any lingering long-poll session from a previous process.
+   *  3. Enter our own long-poll loop.
    */
   async start(): Promise<void> {
     if (this.isRunning) return;
 
-    await this.bot.launch();
+    // 1. Ensure no webhook is set and drop pending updates
+    await this.apiCall("deleteWebhook", { drop_pending_updates: true });
+
+    // 2. Flush any lingering getUpdates session.  After a hard kill (SIGKILL),
+    //    Telegram may hold the old long-poll open for up to 30s.  We retry
+    //    until the flush succeeds, meaning the old session is truly gone.
+    for (let attempt = 1; attempt <= 10; attempt++) {
+      try {
+        const flush = await this.apiCall("getUpdates", {
+          offset: -1,
+          timeout: 0,
+        });
+        if (flush.ok && flush.result?.length) {
+          this.updateOffset =
+            flush.result[flush.result.length - 1].update_id + 1;
+        }
+        logger.info("Telegram session flush succeeded");
+        break; // Success – old session is gone
+      } catch (err: any) {
+        const is409 = typeof err?.message === "string" && err.message.includes("409");
+        if (is409 && attempt < 10) {
+          const wait = Math.min(5_000 * attempt, 30_000);
+          logger.warn(`Flush attempt ${attempt}/10 got 409, waiting ${wait / 1000}s...`);
+          await new Promise((r) => setTimeout(r, wait));
+        } else {
+          logger.warn("Flush failed, proceeding anyway", { error: String(err) });
+          break;
+        }
+      }
+    }
+
     this.isRunning = true;
-    logger.info("Telegram bot started");
+    this.pollAbort = new AbortController();
+
+    // Fire-and-forget the polling loop (it runs until stop() is called)
+    this.pollLoop().catch((err) => {
+      if (this.isRunning) {
+        logger.error("Polling loop crashed", { error: String(err) });
+      }
+    });
+
+    logger.info("Telegram bot started (manual long-polling, no Telegraf)");
 
     await this.notifyAdmin(
-      "🟢 <b>Bot gestartet</b>\nMeteora DAMM v2 Alert Bot ist online und wartet auf Alerts."
+      "🟢 <b>Bot gestartet</b>\nMeteora DAMM v2 Pool-Watcher ist online."
     );
   }
 
@@ -58,121 +124,184 @@ export class TelegramBot {
    * Stop the bot gracefully.
    */
   async stop(): Promise<void> {
-    if (!this.isRunning) return;
+    if (this.isRunning) {
+      await this.notifyAdmin(
+        "🔴 <b>Bot gestoppt</b>\nMeteora DAMM v2 Pool-Watcher wird heruntergefahren."
+      );
+    }
 
-    await this.notifyAdmin(
-      "🔴 <b>Bot gestoppt</b>\nMeteora DAMM v2 Alert Bot wird heruntergefahren."
-    );
-
-    this.bot.stop("SIGTERM");
     this.isRunning = false;
+    this.pollAbort?.abort();
+    this.pollAbort = null;
     logger.info("Telegram bot stopped");
   }
 
-  private setupHandlers(): void {
-    // Listen to all messages from the alert channel
-    this.bot.on("message", async (ctx: Context) => {
-      try {
-        const chatId = ctx.chat?.id?.toString();
-        const senderId = ctx.from?.id?.toString() || "unknown";
-
-        // Only process messages from the alert channel
-        if (chatId !== config.telegram.alertChatId) {
-          // Handle admin commands from admin chat
-          if (chatId === config.telegram.adminChatId) {
-            await this.handleAdminMessage(ctx);
-          }
-          return;
-        }
-
-        // Extract text from message
-        const text = this.extractText(ctx);
-        if (!text) return;
-
-        logger.debug("Received alert channel message", {
-          chatId,
-          senderId,
-          text: text.substring(0, 100),
-        });
-
-        // Parse the alert
-        const alert = parseAlertMessage(text, senderId);
-        if (!alert) return;
-
-        // Notify admin about incoming alert
-        await this.notifyAdmin(
-          `📨 <b>Alert empfangen</b>\n` +
-            `Token(s): ${alert.tokenMints.map((t) => `<code>${t.toBase58()}</code>`).join(", ")}\n` +
-            (alert.poolAddress
-              ? `Pool: <code>${alert.poolAddress.toBase58()}</code>\n`
-              : "") +
-            `Von: ${senderId}`
-        );
-
-        // Call all registered alert handlers
-        for (const handler of this.alertHandlers) {
-          try {
-            await handler(alert);
-          } catch (err) {
-            logger.error("Alert handler failed", { error: String(err) });
-            await this.notifyAdmin(
-              `⚠️ <b>Alert Handler Fehler</b>\n<code>${String(err)}</code>`
-            );
-          }
-        }
-      } catch (err) {
-        logger.error("Error processing message", { error: String(err) });
-      }
-    });
-
-    // Error handling
-    this.bot.catch((err: any) => {
-      logger.error("Telegram bot error", { error: String(err) });
-    });
+  /**
+   * Register an additional command handler.
+   * The handler receives a minimal context object with `.reply()`,
+   * `.message`, and `.chat`.
+   */
+  registerCommand(
+    command: string,
+    handler: (ctx: MinimalContext) => Promise<void>
+  ): void {
+    this.commandHandlers.push({ command, handler });
   }
 
-  private async handleAdminMessage(ctx: Context): Promise<void> {
-    const text = this.extractText(ctx);
+  // ── Private: long-polling loop ───────────────────────────────────
+
+  private async pollLoop(): Promise<void> {
+    while (this.isRunning) {
+      try {
+        const data = await this.apiCall(
+          "getUpdates",
+          {
+            offset: this.updateOffset,
+            timeout: 30,
+            allowed_updates: ["message"],
+          },
+          this.pollAbort?.signal
+        );
+
+        if (!data.ok || !Array.isArray(data.result)) continue;
+
+        this.consecutive409s = 0; // Reset on successful poll
+
+        for (const update of data.result as TgUpdate[]) {
+          this.updateOffset = update.update_id + 1;
+          try {
+            await this.handleUpdate(update);
+          } catch (err) {
+            logger.error("Error handling update", { error: String(err) });
+          }
+        }
+      } catch (err: any) {
+        // AbortError is expected when stop() is called
+        if (err?.name === "AbortError") break;
+
+        // 409 = another getUpdates session is active; use exponential backoff
+        const is409 =
+          typeof err?.message === "string" && err.message.includes("409");
+
+        if (is409) {
+          this.consecutive409s = (this.consecutive409s || 0) + 1;
+          // Exponential backoff: 10s, 20s, 40s, ... capped at 120s
+          const backoff = Math.min(10_000 * Math.pow(2, this.consecutive409s - 1), 120_000);
+
+          logger.warn(
+            `Telegram 409 conflict (attempt ${this.consecutive409s}), waiting ${backoff / 1000}s before retry`,
+          );
+
+          await new Promise((r) => setTimeout(r, backoff));
+        } else {
+          this.consecutive409s = 0;
+          logger.error(
+            `Telegram getUpdates error, retrying in 5s`,
+            { error: String(err) }
+          );
+          await new Promise((r) => setTimeout(r, 5_000));
+        }
+      }
+    }
+  }
+
+  /**
+   * Process a single Telegram update.
+   */
+  private async handleUpdate(update: TgUpdate): Promise<void> {
+    const msg = update.message;
+    if (!msg) return;
+
+    const chatId = msg.chat.id.toString();
+    if (chatId !== config.telegram.adminChatId) return;
+
+    const text = msg.text ?? msg.caption ?? null;
     if (!text) return;
 
+    const ctx = this.buildContext(msg);
+
+    // Check registered command handlers first
+    const trimmed = text.trim();
+    const cmdMatch = trimmed.match(/^\/(\S+)/);
+    if (cmdMatch) {
+      const cmdName = cmdMatch[1].toLowerCase().replace(/@.*$/, ""); // strip @botname
+
+      for (const { command, handler } of this.commandHandlers) {
+        if (command === cmdName) {
+          await handler(ctx);
+          return;
+        }
+      }
+    }
+
+    // Built-in handlers
+    await this.handleBuiltinCommands(ctx, text);
+  }
+
+  private async handleBuiltinCommands(
+    ctx: MinimalContext,
+    text: string
+  ): Promise<void> {
     const command = text.trim().toLowerCase();
 
     if (command === "/status") {
-      await ctx.reply("🟢 Bot ist aktiv und wartet auf Alerts.");
+      await ctx.reply("🟢 Bot ist aktiv. Pool-Watcher läuft.");
     } else if (command === "/help") {
       await ctx.reply(
         "📋 <b>Verfügbare Befehle:</b>\n\n" +
           "/status - Bot-Status anzeigen\n" +
           "/positions - Offene Positionen anzeigen\n" +
           "/balance - Wallet-Balance anzeigen\n" +
+          "/mcap &lt;token&gt; - Market Cap abfragen\n" +
           "/closeall - Alle Positionen schließen\n" +
+          "/history - Geschlossene Positionen\n" +
           "/help - Diese Hilfe anzeigen",
         { parse_mode: "HTML" }
       );
     }
-    // Other commands are handled by the main orchestrator via command registration
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────────
+
+  /**
+   * Build a minimal Telegraf-compatible context from a raw Telegram message.
+   */
+  private buildContext(msg: TgMessage): MinimalContext {
+    return {
+      message: msg,
+      chat: msg.chat ? { id: msg.chat.id, type: msg.chat.type } : undefined,
+      reply: async (text: string, extra?: { parse_mode?: string }) => {
+        await this.apiCall("sendMessage", {
+          chat_id: msg.chat.id,
+          text,
+          ...(extra?.parse_mode ? { parse_mode: extra.parse_mode } : {}),
+        });
+      },
+    };
   }
 
   /**
-   * Register additional command handlers.
+   * Low-level Telegram Bot API call via fetch().
    */
-  registerCommand(
-    command: string,
-    handler: (ctx: Context) => Promise<void>
-  ): void {
-    this.bot.command(command, async (ctx) => {
-      // Only allow admin
-      if (ctx.chat?.id?.toString() !== config.telegram.adminChatId) return;
-      await handler(ctx);
+  private async apiCall(
+    method: string,
+    params: Record<string, unknown> = {},
+    signal?: AbortSignal
+  ): Promise<any> {
+    const resp = await fetch(`${TELEGRAM_API}/${method}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+      signal,
     });
-  }
 
-  private extractText(ctx: Context): string | null {
-    const msg = ctx.message;
-    if (!msg) return null;
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(
+        `Telegram API ${method} failed (${resp.status}): ${body}`
+      );
+    }
 
-    if ("text" in msg) return msg.text;
-    if ("caption" in msg) return msg.caption || null;
-    return null;
+    return resp.json();
   }
 }

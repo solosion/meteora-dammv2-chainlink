@@ -3,9 +3,8 @@ import BN from "bn.js";
 import { config } from "./config";
 import { logger } from "./utils/logger";
 import { TelegramBot } from "./telegram/bot";
-import { ParsedAlert } from "./telegram/parser";
 import { getWallet, getWalletBalance } from "./solana/wallet";
-import { getPoolByAddress, findPoolForToken } from "./meteora/pools";
+import { getPoolByAddress } from "./meteora/pools";
 import { openPosition } from "./meteora/positions";
 import { checkCanOpenPosition, monitorPositions, closeAllPositions } from "./risk/manager";
 import {
@@ -14,43 +13,129 @@ import {
   getAllPositions,
   getTotalPnl,
   getTotalExposureSol,
+  getPositionsSummary,
 } from "./tracker/store";
+import { getTokenMarketData } from "./market/marketcap";
+import { getPoolFromDataApi, DataApiPool } from "./meteora/dataapi";
+import { PoolWatcher, NewPoolEvent } from "./watcher/poolwatcher";
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let telegramBot: TelegramBot;
+let poolWatcher: PoolWatcher | null = null;
 
 /**
- * Handle an incoming alert: find pool, check risk, open position.
+ * Fetch pool info from Meteora Data API with retries.
+ * New pools may not be indexed immediately, so we retry a few times.
  */
-async function handleAlert(alert: ParsedAlert): Promise<void> {
-  logger.info("Processing alert", {
-    tokens: alert.tokenMints.map((t) => t.toBase58()),
-    pool: alert.poolAddress?.toBase58(),
-  });
+async function fetchPoolDataWithRetry(
+  poolAddress: string,
+  maxRetries: number = 3,
+  delayMs: number = 10_000
+): Promise<DataApiPool | null> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const data = await getPoolFromDataApi(poolAddress);
+    if (data && data.tokenASymbol) {
+      return data;
+    }
+    if (attempt < maxRetries) {
+      logger.info(`Pool not yet on Meteora Data API, retry ${attempt}/${maxRetries} in ${delayMs / 1000}s...`, {
+        pool: poolAddress,
+      });
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  return null;
+}
 
-  // If a pool address was provided directly, use it
-  if (alert.poolAddress) {
-    await processPool(alert.poolAddress);
+/**
+ * Handle a new pool detected by the on-chain watcher.
+ * Uses Meteora Data API for pool info (token symbols, TVL).
+ * No DexScreener dependency — new pools are checked directly via Meteora.
+ */
+async function handleNewPool(event: NewPoolEvent): Promise<void> {
+  const poolStr = event.poolAddress.toBase58();
+  logger.info("New DAMM v2 pool detected by watcher", { pool: poolStr });
+
+  await telegramBot.notifyAdmin(
+    `🔍 <b>Neuer DAMM v2 Pool erkannt!</b>\n` +
+      `Pool: <code>${poolStr}</code>\n` +
+      `TX: <code>${event.txSignature}</code>\n` +
+      `Lade Pool-Daten von Meteora...`
+  );
+
+  // Step 1: Get pool data from Meteora Data API (with retry for new pools)
+  const poolData = await fetchPoolDataWithRetry(poolStr);
+
+  // Determine token symbols — from Data API or fallback to on-chain mints
+  let tokenSymbol = "???";
+  let poolName = poolStr.substring(0, 8) + "...";
+  let tvl = 0;
+
+  if (poolData) {
+    const WSOL = "So11111111111111111111111111111111111111112";
+    // Pick the non-SOL token symbol for display
+    tokenSymbol =
+      poolData.tokenAAddress === WSOL
+        ? poolData.tokenBSymbol
+        : poolData.tokenASymbol;
+    poolName = poolData.poolName;
+    tvl = poolData.tvl;
+  } else {
+    logger.warn("Pool not found on Meteora Data API after retries, proceeding with on-chain data", {
+      pool: poolStr,
+    });
+  }
+
+  // Step 2: Token suffix filter (only if we have token symbols)
+  const allowedSuffixes = config.watcher.allowedTokenSuffixes;
+  if (allowedSuffixes.length > 0 && tokenSymbol !== "???") {
+    const symbolLower = tokenSymbol.toLowerCase();
+    const nameLower = poolName.toLowerCase();
+    const matchesSuffix = allowedSuffixes.some(
+      (suffix) => symbolLower.endsWith(suffix) || nameLower.endsWith(suffix)
+    );
+    if (!matchesSuffix) {
+      await telegramBot.notifyAdmin(
+        `🚫 <b>Pool-Watcher: Token-Filter</b>\n` +
+          `Token: ${tokenSymbol} (${poolName})\n` +
+          `Nur Tokens mit Suffix [${allowedSuffixes.join(", ")}] erlaubt`
+      );
+      return;
+    }
+  }
+
+  // Step 3: TVL / Liquiditäts-Check (use Meteora TVL instead of DexScreener liquidity)
+  if (poolData && tvl > 0 && tvl < config.risk.minLiquidityUsd) {
+    await telegramBot.notifyAdmin(
+      `🚫 <b>Pool-Watcher: TVL zu gering</b>\n` +
+        `Token: ${tokenSymbol}\n` +
+        `TVL: $${formatUsd(tvl)} (Min: $${formatUsd(config.risk.minLiquidityUsd)})`
+    );
     return;
   }
 
-  // Otherwise, search for pools for each token mint
-  for (const tokenMint of alert.tokenMints) {
-    const pool = await findPoolForToken(tokenMint);
-    if (pool) {
-      await processPool(pool.address);
-    } else {
-      await telegramBot.notifyAdmin(
-        `⚠️ Kein DAMM v2 Pool gefunden für Token <code>${tokenMint.toBase58()}</code>`
-      );
-    }
-  }
+  await telegramBot.notifyAdmin(
+    `✅ <b>Pool-Watcher: Alle Filter bestanden!</b>\n` +
+      `Token: ${tokenSymbol} (${poolName})\n` +
+      `TVL: $${formatUsd(tvl)}\n` +
+      `Eröffne Position...`
+  );
+
+  // Step 4: Open position
+  await processPool(event.poolAddress, tokenSymbol);
+}
+
+function formatUsd(n: number): string {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(2)}K`;
+  return n.toFixed(2);
 }
 
 /**
  * Process a specific pool: check risks and open position.
  */
-async function processPool(poolAddress: PublicKey): Promise<void> {
+async function processPool(poolAddress: PublicKey, tokenSymbol?: string): Promise<void> {
   const pool = await getPoolByAddress(poolAddress);
   if (!pool) {
     await telegramBot.notifyAdmin(
@@ -112,8 +197,7 @@ async function processPool(poolAddress: PublicKey): Promise<void> {
         `Pool: <code>${poolAddress.toBase58()}</code>\n` +
         `Position: <code>${result.positionAddress.toBase58()}</code>\n` +
         `Größe: ${positionSizeSol} SOL\n` +
-        `TX: <code>${result.txSignature}</code>\n` +
-        `Stop-Loss: -${config.risk.stopLossPercent}% | Take-Profit: +${config.risk.takeProfitPercent}%`
+        `TX: <code>${result.txSignature}</code>`
     );
   } catch (err) {
     logger.error("Failed to open position", { error: String(err) });
@@ -135,9 +219,8 @@ function startMonitor(): void {
     try {
       const result = await monitorPositions();
 
-      // Send alerts to admin
-      for (const alert of result.alerts) {
-        await telegramBot.notifyAdmin(alert);
+      for (const update of result.updates) {
+        await telegramBot.notifyAdmin(update);
       }
     } catch (err) {
       logger.error("Monitor loop error", { error: String(err) });
@@ -175,30 +258,16 @@ function registerAdminCommands(): void {
         `💵 Exposure: ${exposure.toFixed(4)}/${config.risk.maxTotalExposureSol} SOL\n` +
         `📉 Gesamt P&L: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL\n` +
         `⚙️ Max Position: ${config.risk.maxPositionSizeSol} SOL\n` +
-        `🛑 Stop-Loss: -${config.risk.stopLossPercent}%\n` +
-        `🎯 Take-Profit: +${config.risk.takeProfitPercent}%`,
+        `📊 Max Market Cap: $${formatUsd(config.risk.maxMarketCapUsd)}\n` +
+        `💧 Min Liquidität: $${formatUsd(config.risk.minLiquidityUsd)}`,
       { parse_mode: "HTML" }
     );
   });
 
-  // /positions - Show open positions
+  // /positions - Show open positions with live P&L
   telegramBot.registerCommand("positions", async (ctx) => {
-    const openPos = getOpenPositions();
-    if (openPos.length === 0) {
-      await ctx.reply("📭 Keine offenen Positionen.");
-      return;
-    }
-
-    let msg = `📋 <b>Offene Positionen (${openPos.length})</b>\n\n`;
-    for (const pos of openPos) {
-      msg +=
-        `<b>${pos.id}</b>\n` +
-        `  Pool: <code>${pos.poolAddress.substring(0, 12)}...</code>\n` +
-        `  Größe: ${pos.entryValueSol} SOL\n` +
-        `  Eröffnet: ${new Date(pos.openedAt).toLocaleString("de-DE")}\n\n`;
-    }
-
-    await ctx.reply(msg, { parse_mode: "HTML" });
+    const summary = getPositionsSummary();
+    await ctx.reply(summary, { parse_mode: "HTML" });
   });
 
   // /balance - Show wallet balance
@@ -228,6 +297,48 @@ function registerAdminCommands(): void {
     const results = await closeAllPositions();
     await ctx.reply(
       `📋 <b>Ergebnis:</b>\n` + results.join("\n"),
+      { parse_mode: "HTML" }
+    );
+  });
+
+  // /mcap <token> - Check market cap for a token
+  telegramBot.registerCommand("mcap", async (ctx) => {
+    const msg = ctx.message;
+    const text = (msg && "text" in msg ? msg.text : "") || "";
+    const parts = text.trim().split(/\s+/);
+    if (parts.length < 2) {
+      await ctx.reply(
+        "Verwendung: /mcap <TOKEN_MINT_ADRESSE>\n" +
+          "Zeigt Market Cap und Preis eines Tokens an.",
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    const tokenMint = parts[1];
+    await ctx.reply("Lade Marktdaten...");
+
+    const marketData = await getTokenMarketData(tokenMint);
+    if (!marketData) {
+      await ctx.reply(
+        `❌ Keine Marktdaten gefunden für <code>${tokenMint}</code>`,
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+
+    const eligible = marketData.marketCap <= config.risk.maxMarketCapUsd;
+    await ctx.reply(
+      `📊 <b>Marktdaten: ${marketData.symbol}</b>\n\n` +
+        `Token: ${marketData.name}\n` +
+        `Adresse: <code>${tokenMint}</code>\n` +
+        `Preis: $${marketData.priceUsd}\n` +
+        `Market Cap: $${formatUsd(marketData.marketCap)}\n` +
+        `Liquidität: $${formatUsd(marketData.liquidity)}\n` +
+        `24h Volume: $${formatUsd(marketData.volume24h)}\n` +
+        `24h Änderung: ${marketData.priceChange24h >= 0 ? "+" : ""}${marketData.priceChange24h.toFixed(2)}%\n\n` +
+        `Grenzwert: $${formatUsd(config.risk.maxMarketCapUsd)}\n` +
+        `Status: ${eligible ? "✅ Unter Grenzwert" : "🚫 Über Grenzwert"}`,
       { parse_mode: "HTML" }
     );
   });
@@ -272,9 +383,8 @@ async function main(): Promise<void> {
     logger.warn("Low wallet balance! Consider adding more SOL.");
   }
 
-  // Initialize Telegram bot
+  // Initialize Telegram bot (admin commands only)
   telegramBot = new TelegramBot();
-  telegramBot.onAlert(handleAlert);
   registerAdminCommands();
 
   // Start bot
@@ -283,10 +393,19 @@ async function main(): Promise<void> {
   // Start position monitor
   startMonitor();
 
+  // Start on-chain pool watcher
+  if (config.watcher.enabled) {
+    poolWatcher = new PoolWatcher();
+    poolWatcher.onNewPool(handleNewPool);
+    poolWatcher.start();
+    logger.info("On-chain pool watcher enabled");
+  }
+
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info(`Received ${signal}, shutting down...`);
     stopMonitor();
+    poolWatcher?.stop();
     await telegramBot.stop();
     process.exit(0);
   };
@@ -297,7 +416,30 @@ async function main(): Promise<void> {
   logger.info("Bot is running. Waiting for alerts...");
 }
 
-main().catch((err) => {
-  logger.error("Fatal error", { error: String(err) });
+// Graceful shutdown on uncaught errors — stop Telegram bot before exiting
+// to prevent 409 conflicts when the process restarts.
+async function gracefulExit(reason: string, err?: unknown): Promise<void> {
+  logger.error(`${reason}`, { error: err ? String(err) : "unknown" });
+  try {
+    stopMonitor();
+    poolWatcher?.stop();
+    if (telegramBot) await telegramBot.stop();
+  } catch (cleanupErr) {
+    logger.error("Error during cleanup", { error: String(cleanupErr) });
+  }
+  // Give Telegram API time to release the getUpdates connection
+  await new Promise((resolve) => setTimeout(resolve, 2000));
   process.exit(1);
+}
+
+process.on("uncaughtException", (err) => {
+  gracefulExit("Uncaught exception", err);
+});
+
+process.on("unhandledRejection", (reason) => {
+  gracefulExit("Unhandled rejection", reason);
+});
+
+main().catch((err) => {
+  gracefulExit("Fatal error in main()", err);
 });

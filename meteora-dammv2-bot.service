@@ -1,0 +1,46 @@
+# ===================================================================
+# Meteora DAMM v2 Alert Bot - systemd Service
+#
+# Setup:
+#   1. Bot klonen und bauen:
+#      git clone https://github.com/solosion/meteora-dammv2-chainlink.git /opt/meteora-dammv2-bot
+#      cd /opt/meteora-dammv2-bot && npm install && npm run build
+#
+#   2. .env anlegen:
+#      cp .env.example .env && nano .env
+#
+#   3. Service installieren:
+#      sudo cp meteora-dammv2-bot.service /etc/systemd/system/
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now meteora-bot
+#
+#   4. Logs:
+#      journalctl -u meteora-bot -f
+# ===================================================================
+
+[Unit]
+Description=Meteora DAMM v2 Alert Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/meteora-dammv2-bot
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/meteora-dammv2-bot/.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=meteora-bot
+
+# Sicherheit
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

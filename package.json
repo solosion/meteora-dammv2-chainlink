@@ -7,7 +7,9 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test": "jest --forceExit --detectOpenHandles",
+    "simulate": "ts-node src/simulate-pool.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.0",
@@ -23,7 +25,10 @@
     "winston": "^3.14.0"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/node": "^22.0.0",
+    "jest": "^30.3.0",
+    "ts-jest": "^29.4.6",
     "ts-node": "^10.9.2",
     "typescript": "^5.5.0"
   },
