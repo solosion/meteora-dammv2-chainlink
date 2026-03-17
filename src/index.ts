@@ -30,7 +30,25 @@ async function handleAlert(alert: ParsedAlert): Promise<void> {
 
   // If a pool address was provided directly, use it
   if (alert.poolAddress) {
-    await processPool(alert.poolAddress);
+    const pool = await getPoolByAddress(alert.poolAddress);
+    if (pool) {
+      await processPool(alert.poolAddress);
+      return;
+    }
+
+    // Pool address is not a valid DAMM v2 pool — treat it as a token mint instead
+    logger.warn(
+      `Address ${alert.poolAddress.toBase58()} is not a valid DAMM v2 pool, trying as token mint`
+    );
+    const fallbackPool = await findPoolForToken(alert.poolAddress);
+    if (fallbackPool) {
+      await processPool(fallbackPool.address);
+      return;
+    }
+
+    await telegramBot.notifyAdmin(
+      `⚠️ Adresse <code>${alert.poolAddress.toBase58()}</code> ist weder ein DAMM v2 Pool noch ein Token mit passendem Pool`
+    );
     return;
   }
 

@@ -10,6 +10,11 @@ const TOKEN_2022_PROGRAM_ID = new PublicKey(
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 );
 
+// Meteora DAMM v2 (cp-amm) program ID
+const DAMM_V2_PROGRAM_ID = new PublicKey(
+  "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG"
+);
+
 export interface PoolInfo {
   address: PublicKey;
   tokenAMint: PublicKey;
@@ -41,12 +46,48 @@ async function resolveTokenProgram(mint: PublicKey): Promise<PublicKey> {
 }
 
 /**
+ * Check if an on-chain account is owned by the DAMM v2 program.
+ * Returns false for accounts belonging to other programs (DLMM, token accounts, etc.).
+ */
+async function isDammV2Account(address: PublicKey): Promise<boolean> {
+  try {
+    const connection = getConnection();
+    const accountInfo = await connection.getAccountInfo(address);
+    if (!accountInfo) {
+      logger.warn(`Account ${address.toBase58()} does not exist on-chain`);
+      return false;
+    }
+    if (!accountInfo.owner.equals(DAMM_V2_PROGRAM_ID)) {
+      logger.warn(
+        `Account ${address.toBase58()} is not a DAMM v2 pool (owner: ${accountInfo.owner.toBase58()})`
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    logger.error(`Failed to check account owner for ${address.toBase58()}`, {
+      error: String(err),
+    });
+    return false;
+  }
+}
+
+/**
  * Fetch pool state by direct pool address.
+ * Pre-validates that the account belongs to the DAMM v2 program before deserialization.
  */
 export async function getPoolByAddress(
   poolAddress: PublicKey
 ): Promise<PoolInfo | null> {
   try {
+    // Pre-validate: ensure the account is owned by the DAMM v2 program
+    // This prevents "Invalid account discriminator" errors from trying to
+    // deserialize non-DAMM-v2 accounts (e.g. DLMM pools, token accounts)
+    const isValid = await isDammV2Account(poolAddress);
+    if (!isValid) {
+      return null;
+    }
+
     const cpAmm = getCpAmm();
     const pool = await cpAmm.fetchPoolState(poolAddress);
     if (!pool) return null;
