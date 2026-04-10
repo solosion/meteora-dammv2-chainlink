@@ -17,45 +17,38 @@ export interface RiskCheck {
   reason?: string;
 }
 
-/**
- * Check if a new position can be opened given current risk parameters.
- */
 export async function checkCanOpenPosition(
   positionSizeSol: number
 ): Promise<RiskCheck> {
-  // Check max open positions
   const openCount = getOpenPositionCount();
-  if (openCount >= config.risk.maxOpenPositions) {
+  if (openCount >= config.position.maxOpenPositions) {
     return {
       allowed: false,
-      reason: `Max offene Positionen erreicht (${openCount}/${config.risk.maxOpenPositions})`,
+      reason: `Max open positions reached (${openCount}/${config.position.maxOpenPositions})`,
     };
   }
 
-  // Check position size limit
-  if (positionSizeSol > config.risk.maxPositionSizeSol) {
+  if (positionSizeSol > config.position.sizeSol) {
     return {
       allowed: false,
-      reason: `Position (${positionSizeSol} SOL) überschreitet Limit (${config.risk.maxPositionSizeSol} SOL)`,
+      reason: `Position (${positionSizeSol} SOL) exceeds limit (${config.position.sizeSol} SOL)`,
     };
   }
 
-  // Check total exposure
   const currentExposure = getTotalExposureSol();
-  if (currentExposure + positionSizeSol > config.risk.maxTotalExposureSol) {
+  if (currentExposure + positionSizeSol > config.position.maxTotalExposureSol) {
     return {
       allowed: false,
-      reason: `Gesamtexposure (${currentExposure + positionSizeSol} SOL) überschreitet Limit (${config.risk.maxTotalExposureSol} SOL)`,
+      reason: `Total exposure (${currentExposure + positionSizeSol} SOL) exceeds limit (${config.position.maxTotalExposureSol} SOL)`,
     };
   }
 
-  // Check wallet balance (keep at least 0.05 SOL for fees)
   const balance = await getWalletBalance();
   const minReserve = 0.05;
   if (balance - positionSizeSol < minReserve) {
     return {
       allowed: false,
-      reason: `Nicht genug SOL (Balance: ${balance.toFixed(4)}, benötigt: ${positionSizeSol} + ${minReserve} Reserve)`,
+      reason: `Insufficient SOL (Balance: ${balance.toFixed(4)}, need: ${positionSizeSol} + ${minReserve} reserve)`,
     };
   }
 
@@ -67,10 +60,6 @@ export interface MonitorResult {
   alerts: string[];
 }
 
-/**
- * Monitor open positions for stop-loss and take-profit conditions.
- * This is called periodically by the main loop.
- */
 export async function monitorPositions(): Promise<MonitorResult> {
   const openPositions = getOpenPositions();
   const closedPositions: TrackedPosition[] = [];
@@ -78,37 +67,70 @@ export async function monitorPositions(): Promise<MonitorResult> {
 
   for (const tracked of openPositions) {
     try {
+      // 1. Check max hold time
+      const openedAt = new Date(tracked.openedAt).getTime();
+      const holdMinutes = (Date.now() - openedAt) / 60_000;
+      if (
+        config.risk.maxHoldMinutes > 0 &&
+        holdMinutes >= config.risk.maxHoldMinutes
+      ) {
+        logger.info("Max hold time reached", {
+          position: tracked.id,
+          holdMinutes: holdMinutes.toFixed(1),
+        });
+
+        try {
+          const pool = await getPoolByAddress(
+            new PublicKey(tracked.poolAddress)
+          );
+          if (!pool) {
+            alerts.push(
+              `\u26a0\ufe0f Pool ${tracked.poolAddress.substring(0, 8)}... not reachable for time exit`
+            );
+            continue;
+          }
+          const sig = await closePosition(
+            pool,
+            new PublicKey(tracked.positionAddress),
+            new PublicKey(tracked.positionNftMint)
+          );
+          closeTrackedPosition(tracked.id, sig, "max-hold-time");
+          closedPositions.push(tracked);
+          alerts.push(
+            `\u23f0 Max Hold Time: Position ${tracked.id} closed after ${holdMinutes.toFixed(0)} min`
+          );
+        } catch (err) {
+          alerts.push(
+            `\u26a0\ufe0f Time exit failed for ${tracked.id}: ${String(err)}`
+          );
+        }
+        continue;
+      }
+
+      // 2. Check stop-loss and take-profit
       const pool = await getPoolByAddress(
         new PublicKey(tracked.poolAddress)
       );
-
       if (!pool) {
         alerts.push(
-          `⚠️ Pool ${tracked.poolAddress.substring(0, 8)}... nicht erreichbar`
+          `\u26a0\ufe0f Pool ${tracked.poolAddress.substring(0, 8)}... not reachable`
         );
         continue;
       }
 
-      // Estimate current value based on pool price changes
-      // This is a simplified P&L calculation
       const entryValue = tracked.entryValueSol;
-      // In a real scenario, we'd calculate the current value of the position
-      // by checking the current pool state and our share of liquidity.
-      // For now, we use a simplified approach based on pool metrics.
       const currentValue = await estimatePositionValue(tracked, pool);
-
       if (currentValue === null) continue;
 
       const pnlPercent =
         ((currentValue - entryValue) / entryValue) * 100;
 
-      // Check stop-loss
+      // Stop-loss
       if (pnlPercent <= -config.risk.stopLossPercent) {
         logger.warn("Stop-Loss triggered", {
           position: tracked.id,
           pnlPercent: pnlPercent.toFixed(2),
         });
-
         try {
           const sig = await closePosition(
             pool,
@@ -119,22 +141,21 @@ export async function monitorPositions(): Promise<MonitorResult> {
           closeTrackedPosition(tracked.id, sig, "stop-loss", pnlSol);
           closedPositions.push(tracked);
           alerts.push(
-            `🔴 Stop-Loss: Position ${tracked.id} geschlossen (${pnlPercent.toFixed(1)}%, ${pnlSol.toFixed(4)} SOL)`
+            `\ud83d\udd34 Stop-Loss: ${tracked.id} closed (${pnlPercent.toFixed(1)}%, ${pnlSol.toFixed(4)} SOL)`
           );
         } catch (err) {
           alerts.push(
-            `⚠️ Stop-Loss fehlgeschlagen für ${tracked.id}: ${String(err)}`
+            `\u26a0\ufe0f Stop-Loss failed for ${tracked.id}: ${String(err)}`
           );
         }
       }
 
-      // Check take-profit
+      // Take-profit
       if (pnlPercent >= config.risk.takeProfitPercent) {
         logger.info("Take-Profit triggered", {
           position: tracked.id,
           pnlPercent: pnlPercent.toFixed(2),
         });
-
         try {
           const sig = await closePosition(
             pool,
@@ -145,11 +166,11 @@ export async function monitorPositions(): Promise<MonitorResult> {
           closeTrackedPosition(tracked.id, sig, "take-profit", pnlSol);
           closedPositions.push(tracked);
           alerts.push(
-            `🟢 Take-Profit: Position ${tracked.id} geschlossen (+${pnlPercent.toFixed(1)}%, +${pnlSol.toFixed(4)} SOL)`
+            `\ud83d\udfe2 Take-Profit: ${tracked.id} closed (+${pnlPercent.toFixed(1)}%, +${pnlSol.toFixed(4)} SOL)`
           );
         } catch (err) {
           alerts.push(
-            `⚠️ Take-Profit fehlgeschlagen für ${tracked.id}: ${String(err)}`
+            `\u26a0\ufe0f Take-Profit failed for ${tracked.id}: ${String(err)}`
           );
         }
       }
@@ -163,9 +184,6 @@ export async function monitorPositions(): Promise<MonitorResult> {
   return { closedPositions, alerts };
 }
 
-/**
- * Close all open positions (emergency / manual command).
- */
 export async function closeAllPositions(): Promise<string[]> {
   const openPositions = getOpenPositions();
   const results: string[] = [];
@@ -176,43 +194,30 @@ export async function closeAllPositions(): Promise<string[]> {
         new PublicKey(tracked.poolAddress)
       );
       if (!pool) {
-        results.push(`❌ Pool nicht gefunden: ${tracked.poolAddress}`);
+        results.push(`\u274c Pool not found: ${tracked.poolAddress}`);
         continue;
       }
-
       const sig = await closePosition(
         pool,
         new PublicKey(tracked.positionAddress),
         new PublicKey(tracked.positionNftMint)
       );
       closeTrackedPosition(tracked.id, sig, "manual-close-all");
-      results.push(`✅ ${tracked.id} geschlossen`);
+      results.push(`\u2705 ${tracked.id} closed`);
     } catch (err) {
-      results.push(`❌ ${tracked.id}: ${String(err)}`);
+      results.push(`\u274c ${tracked.id}: ${String(err)}`);
     }
   }
 
   return results;
 }
 
-/**
- * Estimate the current SOL value of a tracked position.
- * This is a simplified estimation — production code would use
- * on-chain position data and current pool prices.
- */
 async function estimatePositionValue(
   tracked: TrackedPosition,
   pool: any
 ): Promise<number | null> {
   try {
-    // Get the current sqrt price from the pool
-    // Compare with the entry sqrt price (which we'd ideally store)
-    // For simplicity: use the entry value as a baseline
-    // A proper implementation would fetch the position's current liquidity share
-    // and calculate the value based on current pool state.
-    //
-    // Placeholder: return entry value (will be improved when on-chain
-    // position querying is refined)
+    // Simplified: return entry value. Production would calculate actual LP share value.
     return tracked.entryValueSol;
   } catch {
     return null;

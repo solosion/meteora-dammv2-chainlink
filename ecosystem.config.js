@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: "meteora-dammv2-bot",
+      name: "meteora-dammv2-pool-tailer",
       script: "dist/index.js",
       instances: 1,
       autorestart: true,

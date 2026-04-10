@@ -16,32 +16,36 @@ function optional(key: string, defaultValue: string): string {
 export const config = {
   solana: {
     rpcUrl: required("SOLANA_RPC_URL"),
+    wsUrl: optional("SOLANA_WS_URL", ""),
     seedPhrase: required("SOLANA_SEED_PHRASE"),
   },
-  telegram: {
-    botToken: required("TELEGRAM_BOT_TOKEN"),
-    alertChatId: required("TELEGRAM_ALERT_CHAT_ID"),
-    adminChatId: required("TELEGRAM_ADMIN_CHAT_ID"),
-  },
-  risk: {
-    maxPositionSizeSol: parseFloat(optional("MAX_POSITION_SIZE_SOL", "0.5")),
-    maxTotalExposureSol: parseFloat(optional("MAX_TOTAL_EXPOSURE_SOL", "5.0")),
-    stopLossPercent: parseFloat(optional("STOP_LOSS_PERCENT", "20")),
-    takeProfitPercent: parseFloat(optional("TAKE_PROFIT_PERCENT", "50")),
+  position: {
+    sizeSol: parseFloat(optional("POSITION_SIZE_SOL", "0.5")),
     maxOpenPositions: parseInt(optional("MAX_OPEN_POSITIONS", "10"), 10),
+    maxTotalExposureSol: parseFloat(optional("MAX_TOTAL_EXPOSURE_SOL", "5.0")),
   },
-  alertParser: {
-    tokenRegex: optional(
-      "ALERT_TOKEN_REGEX",
-      "[1-9A-HJ-NP-Za-km-z]{32,44}"
-    ),
-    allowedSenders: optional("ALERT_ALLOWED_SENDERS", "")
+  filter: {
+    minPoolLiquiditySol: parseFloat(optional("MIN_POOL_LIQUIDITY_SOL", "1.0")),
+    creatorWhitelist: optional("CREATOR_WHITELIST", "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+    creatorBlacklist: optional("CREATOR_BLACKLIST", "")
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
   },
+  risk: {
+    stopLossPercent: parseFloat(optional("STOP_LOSS_PERCENT", "20")),
+    takeProfitPercent: parseFloat(optional("TAKE_PROFIT_PERCENT", "50")),
+    maxHoldMinutes: parseInt(optional("MAX_HOLD_MINUTES", "60"), 10),
+  },
   monitor: {
     intervalSeconds: parseInt(optional("MONITOR_INTERVAL_SECONDS", "30"), 10),
+  },
+  telegram: {
+    botToken: required("TELEGRAM_BOT_TOKEN"),
+    adminChatId: required("TELEGRAM_ADMIN_CHAT_ID"),
   },
   logLevel: optional("LOG_LEVEL", "info"),
 };

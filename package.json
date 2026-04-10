@@ -1,13 +1,14 @@
 {
-  "name": "meteora-dammv2-telegram-bot",
-  "version": "1.0.0",
-  "description": "Telegram alert bot for automated Meteora DAMM v2 liquidity positions",
+  "name": "meteora-dammv2-pool-tailer",
+  "version": "2.0.0",
+  "description": "Real-time DAMM v2 pool tailer — detects new pools and opens LP positions",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "test": "vitest run"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.0",
@@ -23,9 +24,11 @@
     "winston": "^3.14.0"
   },
   "devDependencies": {
+    "@types/bn.js": "^5.2.0",
     "@types/node": "^22.0.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "vitest": "^4.1.4"
   },
   "engines": {
     "node": ">=18.0.0"
