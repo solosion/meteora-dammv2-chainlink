@@ -122,8 +122,11 @@ export async function monitorPositions(): Promise<MonitorResult> {
       const currentValue = await estimatePositionValue(tracked, pool);
       if (currentValue === null) continue;
 
-      const pnlPercent =
-        ((currentValue - entryValue) / entryValue) * 100;
+      // Round to 2 decimals to avoid floating point edge cases
+      // (e.g. -19.999999999996 instead of -20.0)
+      const pnlPercent = Math.round(
+        ((currentValue - entryValue) / entryValue) * 10000
+      ) / 100;
 
       // Stop-loss
       if (pnlPercent <= -config.risk.stopLossPercent) {

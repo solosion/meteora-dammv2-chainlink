@@ -1,4 +1,4 @@
-import { PublicKey, Logs, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { PublicKey, Logs } from "@solana/web3.js";
 import { CP_AMM_PROGRAM_ID } from "@meteora-ag/cp-amm-sdk";
 import { getConnection } from "../solana/connection";
 import { getPoolByAddress } from "../meteora/pools";
