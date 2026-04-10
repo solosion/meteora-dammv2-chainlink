@@ -12,6 +12,7 @@ import {
 import { getWallet, getWalletBalance } from "./solana/wallet";
 import { getPoolByAddress } from "./meteora/pools";
 import { openPosition } from "./meteora/positions";
+import { swapSolForToken, getTokenBalance } from "./swap/jupiter";
 import {
   checkCanOpenPosition,
   monitorPositions,
@@ -24,6 +25,8 @@ import {
   getTotalPnl,
   getTotalExposureSol,
 } from "./tracker/store";
+
+const SOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let telegramBot: TelegramBot;
@@ -66,7 +69,7 @@ async function handleNewPool(candidate: PoolCandidate): Promise<void> {
     return;
   }
 
-  // Open position
+  // Fetch pool state
   const poolAddress = new PublicKey(candidate.poolAddress);
   const pool = await getPoolByAddress(poolAddress);
   if (!pool) {
@@ -76,19 +79,72 @@ async function handleNewPool(candidate: PoolCandidate): Promise<void> {
     return;
   }
 
-  const solLamports = new BN(positionSizeSol * LAMPORTS_PER_SOL);
-  const halfSol = solLamports.div(new BN(2));
+  // Determine which side is SOL and which is the token to acquire
+  const isSolA = pool.tokenAMint.equals(SOL_MINT);
+  const tokenMint = isSolA ? pool.tokenBMint : pool.tokenAMint;
 
   try {
     await telegramBot.notifyAdmin(
-      `\u23f3 <b>Opening position...</b>\n` +
+      `\u23f3 <b>Tailing new pool...</b>\n` +
         `Pool: <code>${candidate.poolAddress}</code>\n` +
         `Creator: <code>${candidate.creator}</code>\n` +
         `Liquidity: ${candidate.initialLiquiditySol.toFixed(2)} SOL\n` +
+        `Token: <code>${tokenMint.toBase58()}</code>\n` +
         `Size: ${positionSizeSol} SOL`
     );
 
-    const result = await openPosition(pool, halfSol, halfSol);
+    // Step 1: Swap half the SOL for the paired token via Jupiter
+    const halfSol = positionSizeSol / 2;
+    logger.info("Step 1: Swapping SOL for token", {
+      solAmount: halfSol,
+      tokenMint: tokenMint.toBase58(),
+    });
+
+    const swapResult = await swapSolForToken(
+      tokenMint,
+      halfSol,
+      config.swap.slippageBps
+    );
+    if (!swapResult.success) {
+      logger.error("Jupiter swap failed", { error: swapResult.error });
+      await telegramBot.notifyAdmin(
+        `\u274c <b>Swap failed</b>\n` +
+          `Pool: <code>${candidate.poolAddress}</code>\n` +
+          `Error: <code>${swapResult.error}</code>`
+      );
+      return;
+    }
+
+    logger.info("Swap successful", {
+      txSig: swapResult.txSignature,
+      outputAmount: swapResult.outputAmount,
+    });
+
+    // Step 2: Get actual token balance after swap
+    const tokenBalance = await getTokenBalance(tokenMint);
+    if (tokenBalance.amount <= 0) {
+      logger.error("Token balance 0 after swap");
+      await telegramBot.notifyAdmin(
+        `\u274c <b>Token balance 0 after swap</b>\n` +
+          `Pool: <code>${candidate.poolAddress}</code>`
+      );
+      return;
+    }
+
+    // Step 3: Open LP position with actual balances
+    const solForLp = new BN(Math.floor(halfSol * LAMPORTS_PER_SOL));
+    const tokenRaw = new BN(swapResult.outputAmount.toString());
+
+    // Assign to correct sides (A or B) based on pool ordering
+    const maxTokenA = isSolA ? solForLp : tokenRaw;
+    const maxTokenB = isSolA ? tokenRaw : solForLp;
+
+    logger.info("Step 2: Opening LP position", {
+      maxTokenA: maxTokenA.toString(),
+      maxTokenB: maxTokenB.toString(),
+    });
+
+    const result = await openPosition(pool, maxTokenA, maxTokenB);
 
     const tracked = addPosition({
       poolAddress: poolAddress.toBase58(),
@@ -108,7 +164,8 @@ async function handleNewPool(candidate: PoolCandidate): Promise<void> {
         `ID: <code>${tracked.id}</code>\n` +
         `Pool: <code>${candidate.poolAddress}</code>\n` +
         `Position: <code>${result.positionAddress.toBase58()}</code>\n` +
-        `Size: ${positionSizeSol} SOL\n` +
+        `Swap: ${halfSol} SOL \u2192 ${tokenBalance.amount.toFixed(2)} tokens\n` +
+        `LP: ${halfSol} SOL + tokens\n` +
         `TX: <code>${result.txSignature}</code>\n` +
         `SL: -${config.risk.stopLossPercent}% | TP: +${config.risk.takeProfitPercent}% | Max: ${config.risk.maxHoldMinutes}min`
     );

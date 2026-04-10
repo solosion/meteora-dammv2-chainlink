@@ -9,6 +9,7 @@ import {
 } from "../tracker/store";
 import { getPoolByAddress } from "../meteora/pools";
 import { closePosition } from "../meteora/positions";
+import { estimatePositionValueSol } from "../meteora/valuation";
 import { getWalletBalance } from "../solana/wallet";
 import { logger } from "../utils/logger";
 
@@ -119,7 +120,11 @@ export async function monitorPositions(): Promise<MonitorResult> {
       }
 
       const entryValue = tracked.entryValueSol;
-      const currentValue = await estimatePositionValue(tracked, pool);
+      const currentValue = await estimatePositionValueSol(
+        new PublicKey(tracked.positionAddress),
+        new PublicKey(tracked.poolAddress),
+        entryValue
+      );
       if (currentValue === null) continue;
 
       // Round to 2 decimals to avoid floating point edge cases
@@ -215,14 +220,3 @@ export async function closeAllPositions(): Promise<string[]> {
   return results;
 }
 
-async function estimatePositionValue(
-  tracked: TrackedPosition,
-  pool: any
-): Promise<number | null> {
-  try {
-    // Simplified: return entry value. Production would calculate actual LP share value.
-    return tracked.entryValueSol;
-  } catch {
-    return null;
-  }
-}

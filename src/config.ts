@@ -35,6 +35,9 @@ export const config = {
       .map((s) => s.trim())
       .filter(Boolean),
   },
+  swap: {
+    slippageBps: parseInt(optional("SWAP_SLIPPAGE_BPS", "300"), 10),
+  },
   risk: {
     stopLossPercent: parseFloat(optional("STOP_LOSS_PERCENT", "20")),
     takeProfitPercent: parseFloat(optional("TAKE_PROFIT_PERCENT", "50")),
