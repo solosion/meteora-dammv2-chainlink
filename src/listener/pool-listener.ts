@@ -14,27 +14,43 @@ const INIT_LOG_MARKERS = [
 
 const SOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
 
+/** Max number of recent TX signatures to track for dedup */
+const DEDUP_CACHE_SIZE = 200;
+
 export type PoolDetectedCallback = (candidate: PoolCandidate) => Promise<void>;
 
 export class PoolListener {
   private subscriptionId: number | null = null;
   private callbacks: PoolDetectedCallback[] = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectAttempts = 0;
   private maxReconnectDelay = 30_000;
+  private stopped = false;
+  private lastLogTime = Date.now();
+  /** Dedup: track recently seen TX signatures to avoid processing the same init twice */
+  private recentTxSigs = new Set<string>();
+  private recentTxOrder: string[] = [];
 
   onPoolDetected(cb: PoolDetectedCallback): void {
     this.callbacks.push(cb);
   }
 
   start(): void {
+    this.stopped = false;
     this.subscribe();
+    this.startHeartbeat();
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
     }
     if (this.subscriptionId !== null) {
       const connection = getConnection();
@@ -54,6 +70,7 @@ export class PoolListener {
     this.subscriptionId = connection.onLogs(
       CP_AMM_PROGRAM_ID,
       async (logs: Logs) => {
+        this.lastLogTime = Date.now();
         try {
           await this.handleLogs(logs);
         } catch (err) {
@@ -64,7 +81,35 @@ export class PoolListener {
     );
 
     this.reconnectAttempts = 0;
+    this.lastLogTime = Date.now();
     logger.info("Pool listener active — watching for new pools");
+  }
+
+  /**
+   * Heartbeat: if no logs received for 120s, assume WS disconnected and resubscribe.
+   * Meteora DAMM v2 is active enough that 120s of silence signals a dead socket.
+   */
+  private startHeartbeat(): void {
+    this.heartbeatTimer = setInterval(() => {
+      const silenceMs = Date.now() - this.lastLogTime;
+      if (silenceMs > 120_000 && !this.stopped) {
+        logger.warn(
+          `No logs received for ${(silenceMs / 1000).toFixed(0)}s — triggering reconnect`
+        );
+        this.reconnect();
+      }
+    }, 30_000);
+  }
+
+  private trackTxSig(txSig: string): boolean {
+    if (this.recentTxSigs.has(txSig)) return false;
+    this.recentTxSigs.add(txSig);
+    this.recentTxOrder.push(txSig);
+    if (this.recentTxOrder.length > DEDUP_CACHE_SIZE) {
+      const oldest = this.recentTxOrder.shift()!;
+      this.recentTxSigs.delete(oldest);
+    }
+    return true;
   }
 
   private async handleLogs(logs: Logs): Promise<void> {
@@ -76,6 +121,13 @@ export class PoolListener {
     if (!isInit) return;
 
     const txSig = logs.signature;
+
+    // Dedup: skip if we already processed this TX
+    if (!this.trackTxSig(txSig)) {
+      logger.debug("Skipping duplicate TX", { txSig });
+      return;
+    }
+
     logger.info("Pool initialization detected!", { txSig });
 
     const connection = getConnection();
@@ -98,7 +150,9 @@ export class PoolListener {
       const postBalance = tx.meta.postBalances[i];
       if (preBalance === 0 && postBalance > 0) {
         try {
-          const acctInfo = await connection.getAccountInfo(accountKeys[i].pubkey);
+          const acctInfo = await connection.getAccountInfo(
+            accountKeys[i].pubkey
+          );
           if (acctInfo && acctInfo.owner.equals(CP_AMM_PROGRAM_ID)) {
             poolAddress = accountKeys[i].pubkey;
             break;
@@ -123,15 +177,16 @@ export class PoolListener {
       return;
     }
 
-    // Estimate initial SOL liquidity from vault balance
+    // Estimate initial SOL liquidity from vault token balance
+    // Vaults are SPL token accounts (wrapped SOL), so use getTokenAccountBalance
     let initialLiquiditySol = 0;
     try {
       if (pool.tokenAMint.equals(SOL_MINT)) {
-        const bal = await connection.getBalance(pool.tokenAVault);
-        initialLiquiditySol = bal / LAMPORTS_PER_SOL;
+        const bal = await connection.getTokenAccountBalance(pool.tokenAVault);
+        initialLiquiditySol = bal.value.uiAmount ?? 0;
       } else if (pool.tokenBMint.equals(SOL_MINT)) {
-        const bal = await connection.getBalance(pool.tokenBVault);
-        initialLiquiditySol = bal / LAMPORTS_PER_SOL;
+        const bal = await connection.getTokenAccountBalance(pool.tokenBVault);
+        initialLiquiditySol = bal.value.uiAmount ?? 0;
       }
     } catch (err) {
       logger.warn("Could not fetch vault balance", { error: String(err) });
@@ -163,6 +218,19 @@ export class PoolListener {
   }
 
   reconnect(): void {
+    if (this.stopped) return;
+
+    // Remove old subscription
+    if (this.subscriptionId !== null) {
+      try {
+        const connection = getConnection();
+        connection.removeOnLogsListener(this.subscriptionId);
+      } catch {
+        // Ignore cleanup errors
+      }
+      this.subscriptionId = null;
+    }
+
     this.reconnectAttempts++;
     const delay = Math.min(
       1000 * Math.pow(2, this.reconnectAttempts - 1),
