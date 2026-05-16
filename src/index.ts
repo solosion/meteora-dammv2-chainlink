@@ -337,6 +337,19 @@ function registerAdminCommands(): void {
 
     await ctx.reply(msg, { parse_mode: "HTML" });
   });
+
+  telegramBot.registerCommand("dlmm_buywalls", async (ctx) => {
+    const count = dlmmStore.size();
+    await ctx.reply(
+      `🚧 <b>DLMM Buy Wall Tracker</b>\n` +
+        `Enabled: ${config.dlmmBuywall.enabled ? "yes" : "no"}\n` +
+        `Min SOL: ${config.dlmmBuywall.minSol}\n` +
+        `Direction: ${config.dlmmBuywall.direction}\n` +
+        `Single-side threshold: ${(config.dlmmBuywall.singleSideThreshold * 100).toFixed(0)}%\n` +
+        `Walls tracked: ${count}`,
+      { parse_mode: "HTML" }
+    );
+  });
 }
 
 async function main(): Promise<void> {
