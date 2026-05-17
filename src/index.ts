@@ -1,9 +1,15 @@
 import { PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import BN from "bn.js";
+import * as path from "path";
 import { config } from "./config";
 import { logger } from "./utils/logger";
 import { TelegramBot } from "./telegram/bot";
 import { PoolListener } from "./listener/pool-listener";
+import { DlmmPositionListener } from "./listener/dlmm-position-listener";
+import { isDlmmBuyWall } from "./dlmm-buywall/filter";
+import { createDlmmBuyWallStore } from "./dlmm-buywall/store";
+import { formatDlmmBuyWallMessage } from "./dlmm-buywall/notifier";
+import { DlmmPositionSnapshot, DetectedDlmmBuyWall } from "./dlmm-buywall/types";
 import {
   shouldTailPool,
   PoolCandidate,
@@ -31,6 +37,43 @@ const SOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let telegramBot: TelegramBot;
 let poolListener: PoolListener;
+let dlmmListener: DlmmPositionListener | null = null;
+const dlmmStore = createDlmmBuyWallStore(
+  path.join(process.cwd(), "data", "dlmm-buywalls.json")
+);
+
+async function handleDlmmBuyWall(snapshot: DlmmPositionSnapshot): Promise<void> {
+  if (dlmmStore.hasSeen(snapshot.positionAddress)) return;
+
+  const verdict = isDlmmBuyWall(snapshot, {
+    minSol: config.dlmmBuywall.minSol,
+    direction: config.dlmmBuywall.direction,
+    singleSideThreshold: config.dlmmBuywall.singleSideThreshold,
+  });
+  if (!verdict.matched) {
+    logger.debug("DLMM position not a buy wall", {
+      position: snapshot.positionAddress.substring(0, 12),
+      reason: verdict.reason,
+    });
+    return;
+  }
+
+  // Record AFTER verdict — only dedup confirmed buy walls.
+  // Still synchronous: no await between hasSeen and recordSeen, so no TOCTOU window.
+  dlmmStore.recordSeen(snapshot.positionAddress, {
+    lbPair: snapshot.lbPairAddress,
+    sol: snapshot.solValue,
+    reason: verdict.reason,
+  });
+
+  const wall: DetectedDlmmBuyWall = { ...snapshot, matchedReason: verdict.reason };
+  logger.info("🚧 DLMM buy wall detected", {
+    position: snapshot.positionAddress,
+    sol: snapshot.solValue.toFixed(2),
+    lbPair: snapshot.lbPairAddress,
+  });
+  await telegramBot.notifyAdmin(formatDlmmBuyWallMessage(wall));
+}
 
 /**
  * Handle a newly detected pool candidate.
@@ -297,6 +340,19 @@ function registerAdminCommands(): void {
 
     await ctx.reply(msg, { parse_mode: "HTML" });
   });
+
+  telegramBot.registerCommand("dlmm_buywalls", async (ctx) => {
+    const count = dlmmStore.size();
+    await ctx.reply(
+      `🚧 <b>DLMM Buy Wall Tracker</b>\n` +
+        `Enabled: ${config.dlmmBuywall.enabled ? "yes" : "no"}\n` +
+        `Min SOL: ${config.dlmmBuywall.minSol}\n` +
+        `Direction: ${config.dlmmBuywall.direction}\n` +
+        `Single-side threshold: ${(config.dlmmBuywall.singleSideThreshold * 100).toFixed(0)}%\n` +
+        `Walls tracked: ${count}`,
+      { parse_mode: "HTML" }
+    );
+  });
 }
 
 async function main(): Promise<void> {
@@ -323,6 +379,18 @@ async function main(): Promise<void> {
   poolListener.onPoolDetected(handleNewPool);
   poolListener.start();
 
+  if (config.dlmmBuywall.enabled) {
+    dlmmListener = new DlmmPositionListener();
+    dlmmListener.onPositionSnapshot(handleDlmmBuyWall);
+    dlmmListener.start();
+    logger.info("DLMM buy wall tracker enabled", {
+      minSol: config.dlmmBuywall.minSol,
+      direction: config.dlmmBuywall.direction,
+    });
+  } else {
+    logger.info("DLMM buy wall tracker disabled (DLMM_BUYWALL_ENABLED=true)");
+  }
+
   // Start position monitor
   startMonitor();
 
@@ -330,6 +398,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     logger.info(`Received ${signal}, shutting down...`);
     poolListener.stop();
+    if (dlmmListener) dlmmListener.stop();
     stopMonitor();
     await telegramBot.stop();
     process.exit(0);
