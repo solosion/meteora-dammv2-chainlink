@@ -44,11 +44,6 @@ const dlmmStore = createDlmmBuyWallStore(
 
 async function handleDlmmBuyWall(snapshot: DlmmPositionSnapshot): Promise<void> {
   if (dlmmStore.hasSeen(snapshot.positionAddress)) return;
-  // claim the slot synchronously to prevent double-notify
-  dlmmStore.recordSeen(snapshot.positionAddress, {
-    lbPair: snapshot.lbPairAddress,
-    sol: snapshot.solValue,
-  });
 
   const verdict = isDlmmBuyWall(snapshot, {
     minSol: config.dlmmBuywall.minSol,
@@ -62,6 +57,14 @@ async function handleDlmmBuyWall(snapshot: DlmmPositionSnapshot): Promise<void> 
     });
     return;
   }
+
+  // Record AFTER verdict — only dedup confirmed buy walls.
+  // Still synchronous: no await between hasSeen and recordSeen, so no TOCTOU window.
+  dlmmStore.recordSeen(snapshot.positionAddress, {
+    lbPair: snapshot.lbPairAddress,
+    sol: snapshot.solValue,
+    reason: verdict.reason,
+  });
 
   const wall: DetectedDlmmBuyWall = { ...snapshot, matchedReason: verdict.reason };
   logger.info("🚧 DLMM buy wall detected", {

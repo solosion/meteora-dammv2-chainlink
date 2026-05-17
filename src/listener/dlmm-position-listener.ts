@@ -6,6 +6,9 @@ import { DlmmPositionSnapshot } from "../dlmm-buywall/types";
 
 const DLMM_PROGRAM_ID = new PublicKey("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
 
+// First 8 bytes of sha256("account:PositionV2") — Anchor discriminator.
+const POSITION_V2_DISCRIMINATOR = Buffer.from([117, 176, 212, 199, 245, 180, 133, 182]);
+
 const EVENT_MARKERS = [
   "Program log: Instruction: InitializePosition",
   "Program log: Instruction: InitializePosition2",
@@ -133,16 +136,21 @@ export class DlmmPositionListener {
 
     const accountKeys = tx.transaction.message.accountKeys;
 
-    // For each account in the TX owned by the DLMM program, try to decode it as a Position
-    // by reading lbPair at offset 8..40 and owner at offset 40..72 (PositionV2 layout).
-    for (const ak of accountKeys) {
-      const pubkey = ak.pubkey;
+    // Fetch all account infos in a single RPC call instead of N sequential getAccountInfo calls.
+    const pubkeys = accountKeys.map((ak) => ak.pubkey);
+    const acctInfos = await connection.getMultipleAccountsInfo(pubkeys);
+
+    // For each account in the TX owned by the DLMM program, try to decode it as a PositionV2
+    // by checking the discriminator, then reading lbPair at offset 8..40 and owner at 40..72.
+    for (let i = 0; i < pubkeys.length; i++) {
+      const pubkey = pubkeys[i];
+      const acctInfo = acctInfos[i];
       try {
-        const acctInfo = await connection.getAccountInfo(pubkey);
         if (!acctInfo) continue;
         if (!acctInfo.owner.equals(DLMM_PROGRAM_ID)) continue;
         const data = acctInfo.data;
         if (data.length < 72) continue; // 8 disc + 32 lbPair + 32 owner
+        if (!data.subarray(0, 8).equals(POSITION_V2_DISCRIMINATOR)) continue;
 
         let lbPair: PublicKey;
         let owner: PublicKey;

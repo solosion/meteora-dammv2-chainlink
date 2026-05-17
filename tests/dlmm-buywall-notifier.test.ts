@@ -40,6 +40,7 @@ describe("formatDlmmBuyWallMessage", () => {
     expect(msg).toContain("below");
     expect(msg).toContain("-100");
     expect(msg).toContain("-50");
+    expect(msg).toContain(wall.tokenXMint); // non-SOL token appears in Token: line
   });
 
   it("uses HTML", () => {
