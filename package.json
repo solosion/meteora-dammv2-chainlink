@@ -9,7 +9,8 @@
     "dev": "ts-node src/index.ts",
     "clean": "rm -rf dist",
     "test": "jest --forceExit --detectOpenHandles",
-    "simulate": "ts-node --transpile-only src/simulate-buywall.ts"
+    "simulate": "ts-node --transpile-only src/simulate-buywall.ts",
+    "go": "npm run build && npm start"
   },
   "dependencies": {
     "@meteora-ag/dlmm": "^1.9.10",
