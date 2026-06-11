@@ -9,7 +9,8 @@
     "dev": "ts-node src/index.ts",
     "clean": "rm -rf dist",
     "test": "jest --forceExit --detectOpenHandles",
-    "simulate": "ts-node src/simulate-pool.ts"
+    "simulate": "ts-node src/simulate-pool.ts",
+    "simulate:buywall": "ts-node --transpile-only src/simulate-buywall.ts"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.0",
