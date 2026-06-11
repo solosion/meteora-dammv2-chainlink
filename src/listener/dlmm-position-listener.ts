@@ -30,6 +30,18 @@ export function isDlmmPositionEventLogBatch(logs: string[]): boolean {
 
 export type DlmmSnapshotCallback = (s: DlmmPositionSnapshot) => Promise<void>;
 
+export interface DlmmListenerStatus {
+  active: boolean;
+  lastEventAgeSec: number;
+  reconnectAttempts: number;
+  startedAt: string | null;
+  counters: {
+    logBatchesMatched: number;
+    txAnalyzed: number;
+    snapshotsProduced: number;
+  };
+}
+
 export class DlmmPositionListener {
   private subscriptionId: number | null = null;
   private callbacks: DlmmSnapshotCallback[] = [];
@@ -40,6 +52,22 @@ export class DlmmPositionListener {
   private lastLogTime = Date.now();
   private recentTxSigs = new Set<string>();
   private recentTxOrder: string[] = [];
+  private startedAt: Date | null = null;
+  private counters = {
+    logBatchesMatched: 0,
+    txAnalyzed: 0,
+    snapshotsProduced: 0,
+  };
+
+  getStatus(): DlmmListenerStatus {
+    return {
+      active: this.subscriptionId !== null && !this.stopped,
+      lastEventAgeSec: Math.floor((Date.now() - this.lastLogTime) / 1000),
+      reconnectAttempts: this.reconnectAttempts,
+      startedAt: this.startedAt ? this.startedAt.toISOString() : null,
+      counters: { ...this.counters },
+    };
+  }
 
   onPositionSnapshot(cb: DlmmSnapshotCallback): void {
     this.callbacks.push(cb);
@@ -47,6 +75,7 @@ export class DlmmPositionListener {
 
   start(): void {
     this.stopped = false;
+    this.startedAt = new Date();
     this.subscribe();
     this.startHeartbeat();
   }
@@ -125,6 +154,7 @@ export class DlmmPositionListener {
     if (logs.err) return;
     if (!isDlmmPositionEventLogBatch(logs.logs)) return;
     if (!this.trackTxSig(logs.signature)) return;
+    this.counters.logBatchesMatched++;
 
     const connection = getConnection();
     const tx = await connection.getParsedTransaction(logs.signature, {
@@ -132,6 +162,7 @@ export class DlmmPositionListener {
       commitment: "confirmed",
     });
     if (!tx || !tx.meta) return;
+    this.counters.txAnalyzed++;
 
     const accountKeys = tx.transaction.message.accountKeys;
     const pubkeys = accountKeys.map((ak) => ak.pubkey);
@@ -169,6 +200,7 @@ export class DlmmPositionListener {
           return null;
         });
         if (!snapshot) continue;
+        this.counters.snapshotsProduced++;
 
         for (const cb of this.callbacks) {
           try {

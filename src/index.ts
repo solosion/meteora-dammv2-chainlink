@@ -22,16 +22,29 @@ import { DlmmPositionListener } from "./listener/dlmm-position-listener";
 import { isDlmmBuyWall } from "./dlmm-buywall/filter";
 import { createDlmmBuyWallStore } from "./dlmm-buywall/store";
 import { formatDlmmBuyWallMessage } from "./dlmm-buywall/notifier";
+import { enrichWall } from "./dlmm-buywall/enrich";
 import { DlmmPositionSnapshot, DetectedDlmmBuyWall } from "./dlmm-buywall/types";
+import { DashboardServer, ActivityEntry } from "./dashboard/server";
 import * as path from "path";
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let telegramBot: TelegramBot;
 let poolWatcher: PoolWatcher | null = null;
 let dlmmListener: DlmmPositionListener | null = null;
+let dashboardServer: DashboardServer | null = null;
 const dlmmStore = createDlmmBuyWallStore(
   path.join(process.cwd(), "data", "dlmm-buywalls.json")
 );
+
+// In-memory ring buffer of recently analyzed positions (matched or not),
+// shown on the dashboard so it's visible the bot is working.
+const ACTIVITY_BUFFER_SIZE = 50;
+const recentActivity: ActivityEntry[] = [];
+
+function pushActivity(entry: ActivityEntry): void {
+  recentActivity.unshift(entry);
+  if (recentActivity.length > ACTIVITY_BUFFER_SIZE) recentActivity.pop();
+}
 
 /**
  * Fetch pool info from Meteora Data API with retries.
@@ -65,6 +78,16 @@ async function handleDlmmBuyWall(snapshot: DlmmPositionSnapshot): Promise<void> 
     direction: config.dlmmBuywall.direction,
     singleSideThreshold: config.dlmmBuywall.singleSideThreshold,
   });
+
+  pushActivity({
+    at: new Date().toISOString(),
+    positionAddress: snapshot.positionAddress,
+    lbPairAddress: snapshot.lbPairAddress,
+    solValue: snapshot.solValue,
+    matched: verdict.matched,
+    reason: verdict.reason,
+  });
+
   if (!verdict.matched) {
     logger.debug("DLMM position not a buy wall", {
       position: snapshot.positionAddress.substring(0, 12),
@@ -73,19 +96,20 @@ async function handleDlmmBuyWall(snapshot: DlmmPositionSnapshot): Promise<void> 
     return;
   }
 
-  dlmmStore.recordSeen(snapshot.positionAddress, {
-    lbPair: snapshot.lbPairAddress,
-    sol: snapshot.solValue,
-    reason: verdict.reason,
-  });
-
   const wall: DetectedDlmmBuyWall = { ...snapshot, matchedReason: verdict.reason };
+
+  // Best-effort market data (symbol, market cap) — never blocks the alert
+  const enriched = await enrichWall(wall);
+
+  dlmmStore.recordWall(enriched);
+
   logger.info("DLMM buy wall detected", {
     position: snapshot.positionAddress,
     sol: snapshot.solValue.toFixed(2),
+    token: enriched.tokenSymbol ?? "unknown",
     lbPair: snapshot.lbPairAddress,
   });
-  await telegramBot.notifyAdmin(formatDlmmBuyWallMessage(wall));
+  await telegramBot.notifyAdmin(formatDlmmBuyWallMessage(enriched));
 }
 
 /**
@@ -387,13 +411,19 @@ function registerAdminCommands(): void {
   // /dlmm_buywalls - Show DLMM buy wall tracker status
   telegramBot.registerCommand("dlmm_buywalls", async (ctx) => {
     const count = dlmmStore.size();
+    const listenerStatus = dlmmListener?.getStatus();
     await ctx.reply(
-      `🚧 <b>DLMM Buy Wall Tracker</b>\n` +
-        `Enabled: ${config.dlmmBuywall.enabled ? "yes" : "no"}\n` +
+      `🧱 <b>DLMM Buy Wall Tracker</b>\n` +
+        `Aktiv: ${config.dlmmBuywall.enabled ? "✅" : "❌"}\n` +
+        `WebSocket: ${listenerStatus?.active ? "✅ verbunden" : "❌ getrennt"}\n` +
+        `Letztes Event: ${listenerStatus ? `vor ${listenerStatus.lastEventAgeSec}s` : "–"}\n` +
         `Min SOL: ${config.dlmmBuywall.minSol}\n` +
-        `Direction: ${config.dlmmBuywall.direction}\n` +
-        `Single-side threshold: ${(config.dlmmBuywall.singleSideThreshold * 100).toFixed(0)}%\n` +
-        `Walls tracked: ${count}`,
+        `Richtung: ${config.dlmmBuywall.direction}\n` +
+        `Einseitig-Schwelle: ${(config.dlmmBuywall.singleSideThreshold * 100).toFixed(0)}%\n` +
+        `Walls erkannt: ${count}\n` +
+        (config.dashboard.enabled
+          ? `\n📊 Dashboard: Port ${config.dashboard.port} auf dem Server`
+          : ""),
       { parse_mode: "HTML" }
     );
   });
@@ -469,12 +499,30 @@ async function main(): Promise<void> {
     logger.info("DLMM buy wall tracker disabled (set DLMM_BUYWALL_ENABLED=true to enable)");
   }
 
+  // Start web dashboard
+  if (config.dashboard.enabled) {
+    dashboardServer = new DashboardServer({
+      store: dlmmStore,
+      getListenerStatus: () => dlmmListener?.getStatus() ?? null,
+      getActivity: () => recentActivity,
+      config: {
+        enabled: config.dlmmBuywall.enabled,
+        minSol: config.dlmmBuywall.minSol,
+        direction: config.dlmmBuywall.direction,
+        singleSideThreshold: config.dlmmBuywall.singleSideThreshold,
+      },
+      authToken: config.dashboard.authToken,
+    });
+    dashboardServer.start(config.dashboard.port, config.dashboard.host);
+  }
+
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info(`Received ${signal}, shutting down...`);
     stopMonitor();
     poolWatcher?.stop();
     dlmmListener?.stop();
+    dashboardServer?.stop();
     await telegramBot.stop();
     process.exit(0);
   };
@@ -493,6 +541,7 @@ async function gracefulExit(reason: string, err?: unknown): Promise<void> {
     stopMonitor();
     poolWatcher?.stop();
     dlmmListener?.stop();
+    dashboardServer?.stop();
     if (telegramBot) await telegramBot.stop();
   } catch (cleanupErr) {
     logger.error("Error during cleanup", { error: String(cleanupErr) });

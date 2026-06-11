@@ -50,4 +50,10 @@ export const config = {
       optional("DLMM_BUYWALL_SINGLE_SIDE_THRESHOLD", "0.95")
     ),
   },
+  dashboard: {
+    enabled: optional("DASHBOARD_ENABLED", "true").toLowerCase() === "true",
+    port: parseInt(optional("DASHBOARD_PORT", "3000"), 10),
+    host: optional("DASHBOARD_HOST", "0.0.0.0"),
+    authToken: optional("DASHBOARD_AUTH_TOKEN", ""),
+  },
 };

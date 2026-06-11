@@ -1,9 +1,24 @@
 import * as fs from "fs";
 import * as path from "path";
+import { DetectedDlmmBuyWall } from "./types";
+
+/**
+ * A confirmed buy wall enriched with optional market data (DexScreener).
+ * Stored in full so the dashboard can render history across restarts.
+ */
+export interface WallRecord extends DetectedDlmmBuyWall {
+  tokenSymbol?: string;
+  tokenName?: string;
+  priceUsd?: number;
+  marketCapUsd?: number;
+  liquidityUsd?: number;
+}
 
 export interface DlmmBuyWallStore {
   hasSeen(positionAddress: string): boolean;
   recordSeen(positionAddress: string, meta: Record<string, unknown>): void;
+  recordWall(wall: WallRecord): void;
+  getWalls(): Array<WallRecord & { firstSeenAt: string }>;
   size(): number;
 }
 
@@ -15,6 +30,50 @@ interface SeenEntry {
 
 interface FileContents {
   seen: SeenEntry[];
+}
+
+/**
+ * Map a stored entry to a WallRecord. Older entries (pre-dashboard) only
+ * stored { lbPair, sol, reason } — those are mapped defensively so the
+ * dashboard never crashes on legacy data.
+ */
+function entryToWall(entry: SeenEntry): (WallRecord & { firstSeenAt: string }) | null {
+  const m = entry.meta as Partial<WallRecord> & { lbPair?: string; sol?: number; reason?: string };
+  const solValue = typeof m.solValue === "number" ? m.solValue : typeof m.sol === "number" ? m.sol : null;
+  const lbPair = m.lbPairAddress ?? m.lbPair;
+  if (solValue === null || !lbPair) return null;
+
+  return {
+    positionAddress: entry.positionAddress,
+    lbPairAddress: lbPair,
+    owner: m.owner ?? "",
+    tokenXMint: m.tokenXMint ?? "",
+    tokenYMint: m.tokenYMint ?? "",
+    tokenXDecimals: m.tokenXDecimals ?? 0,
+    tokenYDecimals: m.tokenYDecimals ?? 0,
+    totalXAmount: m.totalXAmount ?? 0,
+    totalYAmount: m.totalYAmount ?? 0,
+    lowerBinId: m.lowerBinId ?? 0,
+    upperBinId: m.upperBinId ?? 0,
+    activeBinId: m.activeBinId ?? 0,
+    binStep: m.binStep ?? 0,
+    currentPrice: m.currentPrice ?? 0,
+    rangeMinPrice: m.rangeMinPrice ?? 0,
+    rangeMaxPrice: m.rangeMaxPrice ?? 0,
+    solIsTokenY: m.solIsTokenY ?? true,
+    solValue,
+    solFraction: m.solFraction ?? 1,
+    rangeOrientation: m.rangeOrientation ?? "below",
+    detectedAt: m.detectedAt ?? entry.firstSeenAt,
+    txSignature: m.txSignature ?? "",
+    matchedReason: m.matchedReason ?? m.reason ?? "",
+    tokenSymbol: m.tokenSymbol,
+    tokenName: m.tokenName,
+    priceUsd: m.priceUsd,
+    marketCapUsd: m.marketCapUsd,
+    liquidityUsd: m.liquidityUsd,
+    firstSeenAt: entry.firstSeenAt,
+  };
 }
 
 export function createDlmmBuyWallStore(filePath: string): DlmmBuyWallStore {
@@ -32,12 +91,25 @@ export function createDlmmBuyWallStore(filePath: string): DlmmBuyWallStore {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, JSON.stringify({ seen: Array.from(seen.values()) }, null, 2));
   }
+  function recordSeen(a: string, m: Record<string, unknown>): void {
+    if (seen.has(a)) return;
+    seen.set(a, { positionAddress: a, firstSeenAt: new Date().toISOString(), meta: m });
+    persist();
+  }
   return {
     hasSeen: (a) => seen.has(a),
-    recordSeen: (a, m) => {
-      if (seen.has(a)) return;
-      seen.set(a, { positionAddress: a, firstSeenAt: new Date().toISOString(), meta: m });
-      persist();
+    recordSeen,
+    recordWall: (wall) => {
+      recordSeen(wall.positionAddress, wall as unknown as Record<string, unknown>);
+    },
+    getWalls: () => {
+      const walls: Array<WallRecord & { firstSeenAt: string }> = [];
+      for (const entry of seen.values()) {
+        const wall = entryToWall(entry);
+        if (wall) walls.push(wall);
+      }
+      walls.sort((a, b) => (a.firstSeenAt < b.firstSeenAt ? 1 : -1));
+      return walls;
     },
     size: () => seen.size,
   };
