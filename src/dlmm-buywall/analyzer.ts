@@ -6,7 +6,14 @@ import { DlmmPositionSnapshot } from "./types";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
+// Token decimals never change — cache them forever to avoid 2 RPC calls per position.
+const decimalsCache = new Map<string, number>();
+
 async function fetchDecimals(mint: PublicKey): Promise<number> {
+  const key = mint.toBase58();
+  const cached = decimalsCache.get(key);
+  if (cached !== undefined) return cached;
+
   const connection = getConnection();
   const info = await connection.getParsedAccountInfo(mint);
   const decimals = (
@@ -15,8 +22,9 @@ async function fetchDecimals(mint: PublicKey): Promise<number> {
     }
   ).value?.data?.parsed?.info?.decimals;
   if (typeof decimals !== "number") {
-    throw new Error(`Could not read decimals for ${mint.toBase58()}`);
+    throw new Error(`Could not read decimals for ${key}`);
   }
+  decimalsCache.set(key, decimals);
   return decimals;
 }
 
@@ -99,6 +107,9 @@ export async function analyzeDlmmPosition(
     solFraction = solValue > 0 ? totalXUi / solValue : 0;
   }
 
+  const binCount = Math.max(1, upperBinId - lowerBinId + 1);
+  const solPerBin = solValue / binCount;
+
   return {
     positionAddress: positionAddressStr,
     lbPairAddress: lbPairAddressStr,
@@ -119,6 +130,8 @@ export async function analyzeDlmmPosition(
     solIsTokenY,
     solValue,
     solFraction,
+    binCount,
+    solPerBin,
     rangeOrientation,
     detectedAt: new Date().toISOString(),
     txSignature,

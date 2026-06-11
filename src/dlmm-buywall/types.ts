@@ -20,6 +20,10 @@ export interface DlmmPositionSnapshot {
   solIsTokenY: boolean;
   solValue: number;
   solFraction: number;
+  /** How many bins this position spans. */
+  binCount: number;
+  /** SOL per bin — measures how concentrated the wall is. */
+  solPerBin: number;
   rangeOrientation: "above" | "below" | "across";
   detectedAt: string;
   txSignature: string;

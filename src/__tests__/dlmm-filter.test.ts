@@ -22,6 +22,8 @@ function snap(over: Partial<DlmmPositionSnapshot> = {}): DlmmPositionSnapshot {
     solIsTokenY: true,
     solValue: 75,
     solFraction: 1.0,
+    binCount: 51,
+    solPerBin: 75 / 51,
     rangeOrientation: "below",
     detectedAt: "2026-05-15T00:00:00.000Z",
     txSignature: "sig1",

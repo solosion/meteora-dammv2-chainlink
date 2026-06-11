@@ -23,6 +23,7 @@ import { isDlmmBuyWall } from "./dlmm-buywall/filter";
 import { createDlmmBuyWallStore } from "./dlmm-buywall/store";
 import { formatDlmmBuyWallMessage } from "./dlmm-buywall/notifier";
 import { enrichWall } from "./dlmm-buywall/enrich";
+import { computeWallMetrics, computeSignalScore, classifyRelativeTier } from "./dlmm-buywall/metrics";
 import { DlmmPositionSnapshot, DetectedDlmmBuyWall } from "./dlmm-buywall/types";
 import { DashboardServer, ActivityEntry } from "./dashboard/server";
 import * as path from "path";
@@ -98,14 +99,30 @@ async function handleDlmmBuyWall(snapshot: DlmmPositionSnapshot): Promise<void> 
 
   const wall: DetectedDlmmBuyWall = { ...snapshot, matchedReason: verdict.reason };
 
-  // Best-effort market data (symbol, market cap) — never blocks the alert
+  // Best-effort market data (symbol, market cap, volume) — never blocks the alert
   const enriched = await enrichWall(wall);
+
+  // Compute signal score using market context
+  const metrics = computeWallMetrics(enriched);
+  const relTier = classifyRelativeTier(
+    enriched.solValue,
+    enriched.volume24hUsd ?? 0,
+    enriched.solPriceUsd ?? 0
+  );
+  enriched.signalScore = computeSignalScore({
+    solValue: enriched.solValue,
+    distancePct: metrics.distancePct,
+    solPerBin: enriched.solPerBin,
+    solFraction: enriched.solFraction,
+    wallToVolumePct: relTier.wallToVolumePct || undefined,
+  });
 
   dlmmStore.recordWall(enriched);
 
   logger.info("DLMM buy wall detected", {
     position: snapshot.positionAddress,
     sol: snapshot.solValue.toFixed(2),
+    score: enriched.signalScore,
     token: enriched.tokenSymbol ?? "unknown",
     lbPair: snapshot.lbPairAddress,
   });

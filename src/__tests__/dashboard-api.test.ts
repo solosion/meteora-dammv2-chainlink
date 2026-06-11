@@ -30,12 +30,15 @@ function makeWall(over: Partial<WallRecord> = {}): WallRecord {
     solIsTokenY: true,
     solValue: 75,
     solFraction: 1,
+    binCount: 51,
+    solPerBin: 75 / 51,
     rangeOrientation: "below",
     detectedAt: new Date().toISOString(),
     txSignature: "sig1",
     matchedReason: "test wall",
     tokenSymbol: "TEST",
     marketCapUsd: 500_000,
+    signalScore: 72,
     ...over,
   };
 }
@@ -74,6 +77,7 @@ describe("dashboard API", () => {
   });
 
   afterEach(() => {
+    try { deps.store.flush(); } catch {}
     try { fs.unlinkSync(tmpFile); } catch {}
   });
 
@@ -131,6 +135,7 @@ describe("store getWalls", () => {
     const walls = store.getWalls();
     expect(walls).toHaveLength(2);
     expect(walls.map((w) => w.positionAddress).sort()).toEqual(["a", "b"]);
+    store.flush();
     fs.unlinkSync(tmpFile);
   });
 
@@ -161,6 +166,7 @@ describe("store getWalls", () => {
     const tmpFile = path.join(os.tmpdir(), `store-persist-${Date.now()}-${Math.random()}.json`);
     const store = createDlmmBuyWallStore(tmpFile);
     store.recordWall(makeWall({ tokenSymbol: "PERSIST", marketCapUsd: 42 }));
+    store.flush();
     const store2 = createDlmmBuyWallStore(tmpFile);
     const walls = store2.getWalls();
     expect(walls[0].tokenSymbol).toBe("PERSIST");

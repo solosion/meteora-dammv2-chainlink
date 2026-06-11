@@ -28,6 +28,7 @@ describe("DlmmBuyWallStore", () => {
 
   it("persists and reloads from disk", () => {
     store.recordSeen("p1", { sol: 75 });
+    store.flush();
     const s2 = createDlmmBuyWallStore(tmpFile);
     expect(s2.hasSeen("p1")).toBe(true);
   });

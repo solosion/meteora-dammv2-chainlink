@@ -2,16 +2,16 @@ import * as fs from "fs";
 import * as path from "path";
 import { DetectedDlmmBuyWall } from "./types";
 
-/**
- * A confirmed buy wall enriched with optional market data (DexScreener).
- * Stored in full so the dashboard can render history across restarts.
- */
 export interface WallRecord extends DetectedDlmmBuyWall {
   tokenSymbol?: string;
   tokenName?: string;
   priceUsd?: number;
   marketCapUsd?: number;
   liquidityUsd?: number;
+  volume24hUsd?: number;
+  priceChange24h?: number;
+  solPriceUsd?: number;
+  signalScore?: number;
 }
 
 export interface DlmmBuyWallStore {
@@ -20,6 +20,7 @@ export interface DlmmBuyWallStore {
   recordWall(wall: WallRecord): void;
   getWalls(): Array<WallRecord & { firstSeenAt: string }>;
   size(): number;
+  flush(): void;
 }
 
 interface SeenEntry {
@@ -32,11 +33,6 @@ interface FileContents {
   seen: SeenEntry[];
 }
 
-/**
- * Map a stored entry to a WallRecord. Older entries (pre-dashboard) only
- * stored { lbPair, sol, reason } — those are mapped defensively so the
- * dashboard never crashes on legacy data.
- */
 function entryToWall(entry: SeenEntry): (WallRecord & { firstSeenAt: string }) | null {
   const m = entry.meta as Partial<WallRecord> & { lbPair?: string; sol?: number; reason?: string };
   const solValue = typeof m.solValue === "number" ? m.solValue : typeof m.sol === "number" ? m.sol : null;
@@ -63,6 +59,8 @@ function entryToWall(entry: SeenEntry): (WallRecord & { firstSeenAt: string }) |
     solIsTokenY: m.solIsTokenY ?? true,
     solValue,
     solFraction: m.solFraction ?? 1,
+    binCount: m.binCount ?? Math.max(1, (m.upperBinId ?? 0) - (m.lowerBinId ?? 0) + 1),
+    solPerBin: m.solPerBin ?? 0,
     rangeOrientation: m.rangeOrientation ?? "below",
     detectedAt: m.detectedAt ?? entry.firstSeenAt,
     txSignature: m.txSignature ?? "",
@@ -72,12 +70,18 @@ function entryToWall(entry: SeenEntry): (WallRecord & { firstSeenAt: string }) |
     priceUsd: m.priceUsd,
     marketCapUsd: m.marketCapUsd,
     liquidityUsd: m.liquidityUsd,
+    volume24hUsd: m.volume24hUsd,
+    priceChange24h: m.priceChange24h,
+    solPriceUsd: m.solPriceUsd,
+    signalScore: m.signalScore,
     firstSeenAt: entry.firstSeenAt,
   };
 }
 
 export function createDlmmBuyWallStore(filePath: string): DlmmBuyWallStore {
   const seen = new Map<string, SeenEntry>();
+  let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
   if (fs.existsSync(filePath)) {
     try {
       const raw = fs.readFileSync(filePath, "utf-8");
@@ -87,9 +91,20 @@ export function createDlmmBuyWallStore(filePath: string): DlmmBuyWallStore {
       // corrupt — start fresh
     }
   }
-  function persist(): void {
+  function flushSync(): void {
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, JSON.stringify({ seen: Array.from(seen.values()) }, null, 2));
+  }
+  function persist(): void {
+    if (persistTimer) return;
+    persistTimer = setTimeout(() => {
+      persistTimer = null;
+      flushSync();
+    }, 500);
   }
   function recordSeen(a: string, m: Record<string, unknown>): void {
     if (seen.has(a)) return;
@@ -112,5 +127,6 @@ export function createDlmmBuyWallStore(filePath: string): DlmmBuyWallStore {
       return walls;
     },
     size: () => seen.size,
+    flush: flushSync,
   };
 }

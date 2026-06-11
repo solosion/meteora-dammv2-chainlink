@@ -16,7 +16,7 @@ export interface TokenLeaderboardEntry {
 }
 
 export interface WallStats {
-  last24h: { count: number; totalSol: number; biggestSol: number };
+  last24h: { count: number; totalSol: number; biggestSol: number; avgScore: number; highScoreCount: number };
   allTime: { count: number; totalSol: number };
   hourly: HourBucket[];
   leaderboard: TokenLeaderboardEntry[];
@@ -39,6 +39,8 @@ export function computeWallStats(walls: StoredWall[], now: Date = new Date()): W
   let sol24 = 0;
   let biggest24 = 0;
   let solAll = 0;
+  let scoreSum24 = 0;
+  let highScoreCount24 = 0;
 
   // 24 hourly buckets, oldest first
   const buckets: HourBucket[] = [];
@@ -63,6 +65,10 @@ export function computeWallStats(walls: StoredWall[], now: Date = new Date()): W
       count24++;
       sol24 += wall.solValue;
       if (wall.solValue > biggest24) biggest24 = wall.solValue;
+      if (typeof wall.signalScore === "number") {
+        scoreSum24 += wall.signalScore;
+        if (wall.signalScore >= 60) highScoreCount24++;
+      }
 
       const hour = new Date(t);
       hour.setMinutes(0, 0, 0);
@@ -102,7 +108,13 @@ export function computeWallStats(walls: StoredWall[], now: Date = new Date()): W
     .slice(0, 10);
 
   return {
-    last24h: { count: count24, totalSol: sol24, biggestSol: biggest24 },
+    last24h: {
+      count: count24,
+      totalSol: sol24,
+      biggestSol: biggest24,
+      avgScore: count24 > 0 ? Math.round(scoreSum24 / count24) : 0,
+      highScoreCount: highScoreCount24,
+    },
     allTime: { count: walls.length, totalSol: solAll },
     hourly: buckets,
     leaderboard,

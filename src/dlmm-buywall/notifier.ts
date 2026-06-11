@@ -1,5 +1,12 @@
 import { WallRecord } from "./store";
-import { computeWallMetrics, classifyWallTier, classifySupportStrength } from "./metrics";
+import {
+  computeWallMetrics,
+  classifyWallTier,
+  classifySupportStrength,
+  classifyRelativeTier,
+  computeSignalScore,
+  scoreLabel,
+} from "./metrics";
 
 function formatUsd(n: number): string {
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
@@ -14,42 +21,68 @@ export function formatDlmmBuyWallMessage(wall: WallRecord): string {
   const metrics = computeWallMetrics(wall);
   const isSupport = wall.rangeOrientation === "below";
 
+  const relTier = classifyRelativeTier(
+    wall.solValue,
+    wall.volume24hUsd ?? 0,
+    wall.solPriceUsd ?? 0
+  );
+
+  const score = computeSignalScore({
+    solValue: wall.solValue,
+    distancePct: metrics.distancePct,
+    solPerBin: wall.solPerBin,
+    solFraction: wall.solFraction,
+    wallToVolumePct: relTier.wallToVolumePct || undefined,
+  });
+  const sl = scoreLabel(score);
+
   const headline = isSupport
-    ? `🟢 <b>DLMM Buy Wall (Support)</b> ${tier.emoji}`
-    : `🔴 <b>DLMM Sell Wall (Resistance)</b> ${tier.emoji}`;
+    ? `${sl.emoji} <b>DLMM Buy Wall (Support)</b> — Score ${score}/100`
+    : `${sl.emoji} <b>DLMM Sell Wall (Resistance)</b> — Score ${score}/100`;
 
   const tokenLine = wall.tokenSymbol
     ? `🪙 <b>Token:</b> ${wall.tokenSymbol}${wall.tokenName ? ` (${wall.tokenName})` : ""}\n` +
       `   <code>${tokenMint}</code>\n`
     : `🪙 <b>Token:</b> <code>${tokenMint}</code>\n`;
 
-  const marketLine =
-    wall.marketCapUsd && wall.marketCapUsd > 0
-      ? `📊 <b>Market Cap:</b> $${formatUsd(wall.marketCapUsd)}` +
-        (wall.priceUsd ? ` | Preis: $${wall.priceUsd}` : "") +
-        `\n`
-      : "";
+  const marketLines: string[] = [];
+  if (wall.marketCapUsd && wall.marketCapUsd > 0) {
+    marketLines.push(`MCap: $${formatUsd(wall.marketCapUsd)}`);
+  }
+  if (wall.priceUsd) {
+    marketLines.push(`Preis: $${wall.priceUsd}`);
+  }
+  if (wall.priceChange24h !== undefined) {
+    const ch = wall.priceChange24h;
+    marketLines.push(`24h: ${ch >= 0 ? "+" : ""}${ch.toFixed(1)}%`);
+  }
+  const marketLine = marketLines.length > 0 ? `📊 ${marketLines.join(" | ")}\n` : "";
+
+  const volumeLine = wall.volume24hUsd && wall.volume24hUsd > 0
+    ? `📉 <b>Vol 24h:</b> $${formatUsd(wall.volume24hUsd)} — Wall ist ${relTier.label} (${relTier.wallToVolumePct.toFixed(1)}% des Volumens)\n`
+    : "";
+
+  const concLine = `🎯 <b>Konzentration:</b> ${wall.solPerBin.toFixed(1)} SOL/Bin (${wall.binCount} Bins)\n`;
 
   const distanceLine = isSupport
-    ? `📏 <b>Distanz zum Preis:</b> ${metrics.distancePct.toFixed(1)}% (${classifySupportStrength(metrics.distancePct)})\n` +
-      `   Support-Zone reicht bis -${metrics.depthPct.toFixed(1)}%\n`
-    : `📏 <b>Distanz zum Preis:</b> +${metrics.distancePct.toFixed(1)}%\n` +
-      `   Resistance-Zone reicht bis +${metrics.depthPct.toFixed(1)}%\n`;
+    ? `📏 <b>Distanz:</b> ${metrics.distancePct.toFixed(1)}% (${classifySupportStrength(metrics.distancePct)}), Support bis -${metrics.depthPct.toFixed(1)}%\n`
+    : `📏 <b>Distanz:</b> +${metrics.distancePct.toFixed(1)}%, Resistance bis +${metrics.depthPct.toFixed(1)}%\n`;
 
   return (
     `${headline}\n\n` +
-    `💰 <b>Größe:</b> ${wall.solValue.toFixed(2)} SOL ` +
-    `(${(wall.solFraction * 100).toFixed(1)}% einseitig) — ${tier.label}\n` +
+    `💰 <b>Größe:</b> ${wall.solValue.toFixed(1)} SOL ${tier.emoji}` +
+    `${wall.solPriceUsd ? ` (~$${formatUsd(wall.solValue * wall.solPriceUsd)})` : ""}` +
+    ` — ${(wall.solFraction * 100).toFixed(0)}% einseitig\n` +
     distanceLine +
-    `📐 <b>Bins:</b> ${wall.lowerBinId} → ${wall.upperBinId} ` +
-    `(aktiv: ${wall.activeBinId}, Step: ${wall.binStep})\n\n` +
+    concLine +
+    volumeLine +
+    `\n` +
     tokenLine +
     marketLine +
     `🏊 <b>Pool:</b> <code>${wall.lbPairAddress}</code>\n` +
     `👤 <b>Owner:</b> <code>${wall.owner}</code>\n\n` +
-    `🔗 <a href="https://solscan.io/tx/${wall.txSignature}">TX ansehen</a> | ` +
-    `<a href="https://app.meteora.ag/dlmm/${wall.lbPairAddress}">Pool öffnen</a> | ` +
-    `<a href="https://dexscreener.com/solana/${tokenMint}">Chart</a>\n` +
-    `\n<i>${wall.matchedReason}</i>`
+    `🔗 <a href="https://solscan.io/tx/${wall.txSignature}">TX</a> | ` +
+    `<a href="https://app.meteora.ag/dlmm/${wall.lbPairAddress}">Pool</a> | ` +
+    `<a href="https://dexscreener.com/solana/${tokenMint}">Chart</a>`
   );
 }

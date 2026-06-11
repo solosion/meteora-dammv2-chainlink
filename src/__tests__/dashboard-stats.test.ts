@@ -24,10 +24,13 @@ function wall(over: Partial<WallRecord & { firstSeenAt: string }> = {}): WallRec
     solIsTokenY: true,
     solValue: 75,
     solFraction: 1,
+    binCount: 51,
+    solPerBin: 75 / 51,
     rangeOrientation: "below",
     detectedAt: NOW.toISOString(),
     txSignature: "sig",
     matchedReason: "test",
+    signalScore: 65,
     firstSeenAt: NOW.toISOString(),
     ...over,
   };

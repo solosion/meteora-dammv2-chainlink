@@ -121,6 +121,8 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   .act-time { color: var(--muted); flex-shrink: 0; width: 56px; }
   .act-ok { color: var(--green); }
   .act-no { color: var(--muted); }
+  .scorebar { display: inline-block; width: 40px; height: 6px; background: var(--border); border-radius: 3px; vertical-align: middle; margin-left: 4px; }
+  .scorebar-fill { height: 100%; border-radius: 3px; }
   footer { color: var(--muted); font-size: 11px; text-align: center; padding: 16px 0 4px; }
 </style>
 </head>
@@ -133,8 +135,8 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
 <div class="cards">
   <div class="card"><div class="label">Buy Walls (24h)</div><div class="value" id="stCount24">–</div><div class="sub" id="stCount24Sub"></div></div>
   <div class="card"><div class="label">SOL-Volumen (24h)</div><div class="value green" id="stSol24">–</div><div class="sub">in erkannten Walls</div></div>
-  <div class="card"><div class="label">Größte Wall (24h)</div><div class="value" id="stBiggest">–</div><div class="sub" id="stBiggestSub"></div></div>
-  <div class="card"><div class="label">Gesamt erkannt</div><div class="value" id="stAll">–</div><div class="sub" id="stAllSol"></div></div>
+  <div class="card"><div class="label">Signal-Score (Avg)</div><div class="value" id="stAvgScore">–</div><div class="sub" id="stAvgScoreSub"></div></div>
+  <div class="card"><div class="label">Starke Signale</div><div class="value green" id="stHighScore">–</div><div class="sub">Score ≥ 60</div></div>
 </div>
 
 <div class="panel">
@@ -152,8 +154,8 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   <div class="table-wrap">
     <table>
       <thead><tr>
-        <th>Zeit</th><th>Token</th><th>Größe</th><th>Einseitig</th><th>Typ</th>
-        <th>Distanz</th><th>Zone</th><th>Market Cap</th><th>Links</th>
+        <th>Score</th><th>Zeit</th><th>Token</th><th>Größe</th><th>SOL/Bin</th><th>Typ</th>
+        <th>Distanz</th><th>Vol-Ratio</th><th>Market Cap</th><th>Links</th>
       </tr></thead>
       <tbody id="wallsBody"></tbody>
     </table>
@@ -180,7 +182,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   </div>
 </div>
 
-<footer>Aktualisiert alle 5s · Konzept: Einseitige SOL-Liquidität unter dem Preis = Kauf-Mauer (Support) → bullishes Signal</footer>
+<footer>Aktualisiert alle 5s · Score = Größe + Nähe + Konzentration + Einseitigkeit + Vol-Anteil · Score ≥ 60 = Starkes Signal</footer>
 
 <script>
 (function () {
@@ -229,14 +231,11 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
 
   function renderStats(stats) {
     document.getElementById("stCount24").textContent = stats.last24h.count;
-    document.getElementById("stCount24Sub").textContent = "alle: " + stats.allTime.count;
+    document.getElementById("stCount24Sub").textContent = "alle: " + stats.allTime.count + " / " + fmtSol(stats.allTime.totalSol) + " SOL";
     document.getElementById("stSol24").textContent = fmtSol(stats.last24h.totalSol) + " SOL";
-    document.getElementById("stBiggest").textContent =
-      stats.last24h.biggestSol > 0 ? fmtSol(stats.last24h.biggestSol) + " SOL" : "–";
-    document.getElementById("stBiggestSub").textContent =
-      stats.last24h.biggestSol > 0 ? tierEmoji(stats.last24h.biggestSol) + " Tier" : "";
-    document.getElementById("stAll").textContent = stats.allTime.count;
-    document.getElementById("stAllSol").textContent = fmtSol(stats.allTime.totalSol) + " SOL gesamt";
+    document.getElementById("stAvgScore").textContent = stats.last24h.avgScore > 0 ? String(stats.last24h.avgScore) : "–";
+    document.getElementById("stAvgScoreSub").textContent = stats.last24h.count > 0 ? "von " + stats.last24h.count + " Walls" : "";
+    document.getElementById("stHighScore").textContent = String(stats.last24h.highScoreCount);
     renderChart(stats.hourly);
     renderLeaderboard(stats.leaderboard);
   }
@@ -281,6 +280,19 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     body.innerHTML = html;
   }
 
+  function scoreColor(s) {
+    if (s >= 80) return "var(--green)";
+    if (s >= 60) return "#86efac";
+    if (s >= 40) return "var(--yellow)";
+    return "var(--muted)";
+  }
+  function volRatioStr(w) {
+    if (!w.volume24hUsd || !w.solPriceUsd || w.solPriceUsd <= 0) return "–";
+    var pct = (w.solValue * w.solPriceUsd / w.volume24hUsd * 100);
+    if (pct >= 20) return '<span style="color:var(--green);font-weight:700">' + pct.toFixed(1) + '%</span>';
+    if (pct >= 5) return '<span style="color:#86efac">' + pct.toFixed(1) + '%</span>';
+    return '<span class="muted">' + pct.toFixed(1) + '%</span>';
+  }
   function renderWalls(walls) {
     var body = document.getElementById("wallsBody");
     var empty = document.getElementById("wallsEmpty");
@@ -298,18 +310,17 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         ? '<span class="chip support">Support</span>'
         : '<span class="chip resistance">Resistance</span>';
       var d = w.metrics ? w.metrics.distancePct : 0;
-      var depth = w.metrics ? w.metrics.depthPct : 0;
-      var zone = isSupport
-        ? "-" + d.toFixed(1) + "% bis -" + depth.toFixed(1) + "%"
-        : "+" + d.toFixed(1) + "% bis +" + depth.toFixed(1) + "%";
+      var sc = typeof w.signalScore === "number" ? w.signalScore : 0;
+      var spb = w.metrics ? w.metrics.solPerBin : (w.solPerBin || 0);
       html += "<tr>" +
+        '<td style="font-weight:700;color:' + scoreColor(sc) + '">' + sc + "</td>" +
         '<td class="muted" title="' + esc(w.firstSeenAt) + '">' + rel(w.firstSeenAt) + "</td>" +
         '<td><span class="sym">' + sym + '</span> <span class="mono muted copy" data-copy="' + esc(mint) + '" title="Mint kopieren">' + shortAddr(mint) + " ⧉</span></td>" +
         '<td class="sol">' + tierEmoji(w.solValue) + " " + fmtSol(w.solValue) + " SOL</td>" +
-        "<td>" + (w.solFraction * 100).toFixed(0) + "%</td>" +
+        "<td>" + spb.toFixed(1) + "</td>" +
         "<td>" + typeChip + "</td>" +
         '<td><span class="dist ' + distClass(d) + '">' + d.toFixed(1) + "%</span></td>" +
-        '<td class="muted">' + zone + "</td>" +
+        "<td>" + volRatioStr(w) + "</td>" +
         "<td>" + fmtUsd(w.marketCapUsd) + "</td>" +
         '<td class="links">' +
           '<a href="https://solscan.io/tx/' + esc(w.txSignature) + '" target="_blank">TX</a>' +

@@ -20,9 +20,9 @@ const EVENT_MARKERS = [
   "Program log: Instruction: AddLiquidity2",
 ];
 
-const DEDUP_CACHE_SIZE = 500;
+const DEDUP_CACHE_SIZE = 2000;
 const MAX_RECONNECT_DELAY_MS = 30_000;
-const HEARTBEAT_SILENCE_MS = 120_000;
+const HEARTBEAT_SILENCE_MS = 45_000;
 
 export function isDlmmPositionEventLogBatch(logs: string[]): boolean {
   return logs.some((line) => EVENT_MARKERS.some((m) => line.includes(m)));
@@ -118,7 +118,7 @@ export class DlmmPositionListener {
         logger.warn(`DLMM listener silent ${(silence / 1000).toFixed(0)}s, reconnecting`);
         this.reconnect();
       }
-    }, 30_000);
+    }, 15_000);
   }
 
   reconnect(): void {
