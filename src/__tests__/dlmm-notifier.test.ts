@@ -1,4 +1,8 @@
-import { formatDlmmBuyWallMessage } from "../dlmm-buywall/notifier";
+import {
+  formatDlmmBuyWallMessage,
+  formatWallRemovedMessage,
+  formatWallConfirmedMessage,
+} from "../dlmm-buywall/notifier";
 import { WallRecord } from "../dlmm-buywall/store";
 
 const wall: WallRecord = {
@@ -62,5 +66,40 @@ describe("formatDlmmBuyWallMessage", () => {
     const msg = formatDlmmBuyWallMessage(wall);
     expect(msg).toMatch(/<b>/);
     expect(msg).toMatch(/<code>/);
+  });
+});
+
+describe("formatWallRemovedMessage", () => {
+  it("warns that the wall was pulled, with remaining SOL", () => {
+    const msg = formatWallRemovedMessage(
+      { ...wall, signalScore: 72, firstSeenAt: new Date(Date.now() - 30 * 60_000).toISOString() },
+      10.5
+    );
+    expect(msg).toContain("ENTFERNT");
+    expect(msg).toContain("WIF");
+    expect(msg).toContain("75.5 SOL");
+    expect(msg).toContain("Rest: 10.5 SOL");
+    expect(msg).toContain("Score 72");
+    expect(msg).toContain("dexscreener.com");
+  });
+
+  it("omits remaining SOL when position is fully gone", () => {
+    const msg = formatWallRemovedMessage({ ...wall, firstSeenAt: wall.detectedAt }, 0);
+    expect(msg).toContain("ENTFERNT");
+    expect(msg).not.toContain("Rest:");
+  });
+});
+
+describe("formatWallConfirmedMessage", () => {
+  it("announces a standing wall with current SOL", () => {
+    const msg = formatWallConfirmedMessage(
+      { ...wall, signalScore: 72, firstSeenAt: new Date(Date.now() - 90 * 60_000).toISOString() },
+      70.2
+    );
+    expect(msg).toContain("BESTÄTIGT");
+    expect(msg).toContain("WIF");
+    expect(msg).toContain("70.2 SOL");
+    expect(msg).toContain("90 min");
+    expect(msg).toContain("meteora.ag");
   });
 });

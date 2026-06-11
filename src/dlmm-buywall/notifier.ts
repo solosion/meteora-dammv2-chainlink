@@ -15,6 +15,60 @@ function formatUsd(n: number): string {
   return n.toFixed(2);
 }
 
+function ageMinutes(wall: WallRecord & { firstSeenAt?: string }): number {
+  const seenAt = wall.firstSeenAt ?? wall.detectedAt;
+  const t = new Date(seenAt).getTime();
+  if (Number.isNaN(t)) return 0;
+  return Math.max(0, Math.round((Date.now() - t) / 60_000));
+}
+
+/**
+ * Alert: a previously detected wall was pulled. The support is gone —
+ * possible fake signal, exit indicator if you entered on this wall.
+ */
+export function formatWallRemovedMessage(
+  wall: WallRecord & { firstSeenAt?: string },
+  lastKnownSol: number
+): string {
+  const tokenMint = wall.solIsTokenY ? wall.tokenXMint : wall.tokenYMint;
+  const token = wall.tokenSymbol ?? tokenMint.substring(0, 8) + "…";
+  const mins = ageMinutes(wall);
+  return (
+    `⚠️ <b>Buy Wall ENTFERNT</b> — ${token}\n\n` +
+    `Die Wall (${wall.solValue.toFixed(1)} SOL${wall.signalScore ? `, Score ${wall.signalScore}` : ""}) ` +
+    `wurde nach ${mins} min abgezogen` +
+    (lastKnownSol > 0 ? ` (Rest: ${lastKnownSol.toFixed(1)} SOL)` : "") +
+    `.\n` +
+    `Der Support ist weg — mögliches Fake-Signal. ` +
+    `Falls du auf diese Wall eingestiegen bist: Exit prüfen.\n\n` +
+    `🏊 Pool: <code>${wall.lbPairAddress}</code>\n` +
+    `🔗 <a href="https://dexscreener.com/solana/${tokenMint}">Chart</a> | ` +
+    `<a href="https://app.meteora.ag/dlmm/${wall.lbPairAddress}">Pool</a>`
+  );
+}
+
+/**
+ * Alert: a wall is still standing after the confirmation window —
+ * the owner is committed, signal significance increases.
+ */
+export function formatWallConfirmedMessage(
+  wall: WallRecord & { firstSeenAt?: string },
+  currentSol: number
+): string {
+  const tokenMint = wall.solIsTokenY ? wall.tokenXMint : wall.tokenYMint;
+  const token = wall.tokenSymbol ?? tokenMint.substring(0, 8) + "…";
+  const mins = ageMinutes(wall);
+  return (
+    `✅ <b>Buy Wall BESTÄTIGT</b> — ${token}\n\n` +
+    `Die Wall steht seit ${mins} min und hält ${currentSol.toFixed(1)} SOL ` +
+    `(ursprünglich ${wall.solValue.toFixed(1)} SOL${wall.signalScore ? `, Score ${wall.signalScore}` : ""}).\n` +
+    `Der Owner ist committed — die Signal-Signifikanz steigt.\n\n` +
+    `🏊 Pool: <code>${wall.lbPairAddress}</code>\n` +
+    `🔗 <a href="https://dexscreener.com/solana/${tokenMint}">Chart</a> | ` +
+    `<a href="https://app.meteora.ag/dlmm/${wall.lbPairAddress}">Pool</a>`
+  );
+}
+
 export function formatDlmmBuyWallMessage(wall: WallRecord): string {
   const tokenMint = wall.solIsTokenY ? wall.tokenXMint : wall.tokenYMint;
   const tier = classifyWallTier(wall.solValue);

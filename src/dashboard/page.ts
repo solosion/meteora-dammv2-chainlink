@@ -154,7 +154,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   <div class="table-wrap">
     <table>
       <thead><tr>
-        <th>Score</th><th>Zeit</th><th>Token</th><th>Größe</th><th>SOL/Bin</th><th>Typ</th>
+        <th>Score</th><th>Status</th><th>Zeit</th><th>Token</th><th>Größe</th><th>SOL/Bin</th><th>Typ</th>
         <th>Distanz</th><th>Vol-Ratio</th><th>Market Cap</th><th>Links</th>
       </tr></thead>
       <tbody id="wallsBody"></tbody>
@@ -182,7 +182,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   </div>
 </div>
 
-<footer>Aktualisiert alle 5s · Score = Größe + Nähe + Konzentration + Einseitigkeit + Vol-Anteil · Score ≥ 60 = Starkes Signal</footer>
+<footer>Aktualisiert alle 5s · Score = Konzentration (35) + Nähe (25) + Größe (25) + Einseitigkeit (15) ± Vol-Anteil · ✅ = Wall steht seit 1h+, ⚠️ = Wall abgezogen</footer>
 
 <script>
 (function () {
@@ -312,8 +312,17 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
       var d = w.metrics ? w.metrics.distancePct : 0;
       var sc = typeof w.signalScore === "number" ? w.signalScore : 0;
       var spb = w.metrics ? w.metrics.solPerBin : (w.solPerBin || 0);
-      html += "<tr>" +
+      var statusBadge;
+      if (w.status === "removed") {
+        statusBadge = '<span title="Wall wurde abgezogen — Support weg">⚠️ weg</span>';
+      } else if (w.status === "confirmed") {
+        statusBadge = '<span title="Wall steht seit über 1h — Owner committed" style="color:var(--green)">✅ steht</span>';
+      } else {
+        statusBadge = '<span class="muted" title="Wird überwacht">⏳ aktiv</span>';
+      }
+      html += "<tr" + (w.status === "removed" ? ' style="opacity:.45"' : "") + ">" +
         '<td style="font-weight:700;color:' + scoreColor(sc) + '">' + sc + "</td>" +
+        "<td>" + statusBadge + "</td>" +
         '<td class="muted" title="' + esc(w.firstSeenAt) + '">' + rel(w.firstSeenAt) + "</td>" +
         '<td><span class="sym">' + sym + '</span> <span class="mono muted copy" data-copy="' + esc(mint) + '" title="Mint kopieren">' + shortAddr(mint) + " ⧉</span></td>" +
         '<td class="sol">' + tierEmoji(w.solValue) + " " + fmtSol(w.solValue) + " SOL</td>" +

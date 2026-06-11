@@ -83,11 +83,13 @@ export function classifySupportStrength(distancePct: number): string {
 /**
  * Trading signal score 0–100.
  *
- * Factors (each 0–25 points):
- *  1. Size (absolute SOL value)
- *  2. Proximity (how close the wall is to current price)
- *  3. Concentration (SOL per bin — dense walls are harder to break)
- *  4. Single-sidedness (100% SOL = pure conviction)
+ * Factors (weighted — concentration counts most):
+ *  1. Concentration, 0–35 pts (SOL per bin — few bins with lots of SOL is a
+ *     deliberate defense of a price level, the strongest bullish indicator)
+ *  2. Proximity, 0–25 pts (how close the wall is to current price)
+ *  3. Size, 0–25 pts (absolute SOL value, log scale)
+ *  4. Single-sidedness, 0–15 pts (the filter already requires ≥95%, so this
+ *     carries little extra information)
  *
  * Volume context (when wall-to-volume ratio is known): ≥5% adds up to 10
  * bonus points, <1% subtracts 15 — a wall that's tiny vs. daily volume
@@ -102,17 +104,17 @@ export function computeSignalScore(params: {
 }): number {
   const { solValue, distancePct, solPerBin, solFraction } = params;
 
-  // 1. Size: 50 SOL = 5pts, 200 = 15pts, 500+ = 25pts (log scale)
-  const sizeScore = Math.min(25, Math.max(0, Math.log10(Math.max(1, solValue)) * 9.2 - 6));
+  // 1. Concentration: 10+ SOL/bin = 35pts, 1 = 17.5pts, 0.1 = 0pts (log scale)
+  const concScore = Math.min(35, Math.max(0, (Math.log10(Math.max(0.01, solPerBin)) + 1) * 17.5));
 
-  // 2. Proximity: 0% = 25pts, 3% = 18pts, 10% = 10pts, 30%+ = 0pts
+  // 2. Proximity: 0% = 25pts, 3% = 22.5pts, 10% = 16.7pts, 30%+ = 0pts
   const proxScore = Math.min(25, Math.max(0, 25 - distancePct * 0.83));
 
-  // 3. Concentration: >10 SOL/bin = 25pts, 1 = 10pts, 0.1 = 2pts
-  const concScore = Math.min(25, Math.max(0, (Math.log10(Math.max(0.01, solPerBin)) + 1) * 12.5));
+  // 3. Size: 50 SOL = 9.6pts, 200 = 15pts, 500+ = 25pts (log scale)
+  const sizeScore = Math.min(25, Math.max(0, Math.log10(Math.max(1, solValue)) * 9.2 - 6));
 
-  // 4. Single-sidedness: 1.0 = 25pts, 0.95 = 20pts, 0.8 = 5pts
-  const ssScore = Math.min(25, Math.max(0, (solFraction - 0.75) * 100));
+  // 4. Single-sidedness: 1.0 = 15pts, 0.95 = 12pts, 0.75 = 0pts
+  const ssScore = Math.min(15, Math.max(0, (solFraction - 0.75) * 60));
 
   let score = sizeScore + proxScore + concScore + ssScore;
 

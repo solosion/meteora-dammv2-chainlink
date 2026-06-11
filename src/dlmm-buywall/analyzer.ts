@@ -38,6 +38,48 @@ function classify(
   return "across";
 }
 
+/**
+ * Re-check a previously detected wall on-chain.
+ * Returns the position's current SOL value, or null if the position no
+ * longer exists (liquidity pulled / position closed).
+ */
+export async function getCurrentPositionSol(wall: {
+  positionAddress: string;
+  lbPairAddress: string;
+  owner: string;
+  solIsTokenY: boolean;
+}): Promise<number | null> {
+  const connection = getConnection();
+  const dlmm = await DLMM.create(connection, new PublicKey(wall.lbPairAddress));
+  const { userPositions } = await dlmm.getPositionsByUserAndLbPair(
+    new PublicKey(wall.owner)
+  );
+  const match = userPositions.find(
+    (p) => p.publicKey.toBase58() === wall.positionAddress
+  );
+  if (!match) return null;
+
+  const tokenXMint: PublicKey = dlmm.lbPair.tokenXMint;
+  const tokenYMint: PublicKey = dlmm.lbPair.tokenYMint;
+  const [decimalsX, decimalsY] = await Promise.all([
+    fetchDecimals(tokenXMint),
+    fetchDecimals(tokenYMint),
+  ]);
+
+  const totalXUi = Number(match.positionData.totalXAmount) / Math.pow(10, decimalsX);
+  const totalYUi = Number(match.positionData.totalYAmount) / Math.pow(10, decimalsY);
+  const decimalAdj = Math.pow(10, decimalsX - decimalsY);
+  const currentPrice =
+    getPriceOfBinByBinId(dlmm.lbPair.activeId, dlmm.lbPair.binStep).toNumber() * decimalAdj;
+
+  if (wall.solIsTokenY) {
+    const xInSol = currentPrice > 0 ? totalXUi * currentPrice : 0;
+    return totalYUi + xInSol;
+  }
+  const yInSol = currentPrice > 0 ? totalYUi / currentPrice : 0;
+  return totalXUi + yInSol;
+}
+
 export async function analyzeDlmmPosition(
   positionAddressStr: string,
   lbPairAddressStr: string,

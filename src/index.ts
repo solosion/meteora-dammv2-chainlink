@@ -4,7 +4,13 @@ import { TelegramBot } from "./telegram/bot";
 import { DlmmPositionListener } from "./listener/dlmm-position-listener";
 import { isDlmmBuyWall } from "./dlmm-buywall/filter";
 import { createDlmmBuyWallStore } from "./dlmm-buywall/store";
-import { formatDlmmBuyWallMessage } from "./dlmm-buywall/notifier";
+import {
+  formatDlmmBuyWallMessage,
+  formatWallRemovedMessage,
+  formatWallConfirmedMessage,
+} from "./dlmm-buywall/notifier";
+import { WallMonitor } from "./dlmm-buywall/monitor";
+import { getCurrentPositionSol } from "./dlmm-buywall/analyzer";
 import { enrichWall } from "./dlmm-buywall/enrich";
 import { computeWallMetrics, computeSignalScore, classifyRelativeTier } from "./dlmm-buywall/metrics";
 import { DlmmPositionSnapshot } from "./dlmm-buywall/types";
@@ -14,6 +20,7 @@ import * as path from "path";
 let telegramBot: TelegramBot;
 let dlmmListener: DlmmPositionListener | null = null;
 let dashboardServer: DashboardServer | null = null;
+let wallMonitor: WallMonitor | null = null;
 const dlmmStore = createDlmmBuyWallStore(
   path.join(process.cwd(), "data", "dlmm-buywalls.json")
 );
@@ -136,6 +143,22 @@ async function main(): Promise<void> {
       minSol: config.dlmmBuywall.minSol,
       direction: config.dlmmBuywall.direction,
     });
+
+    // Re-check detected walls: alert when a wall is pulled (exit signal)
+    // or still standing after 1h (signal confirmation).
+    wallMonitor = new WallMonitor(
+      dlmmStore,
+      (wall) => getCurrentPositionSol(wall),
+      {
+        onRemoved: async (wall, lastSol) => {
+          await telegramBot.notifyAdmin(formatWallRemovedMessage(wall, lastSol));
+        },
+        onConfirmed: async (wall, currentSol) => {
+          await telegramBot.notifyAdmin(formatWallConfirmedMessage(wall, currentSol));
+        },
+      }
+    );
+    wallMonitor.start();
   } else {
     logger.info("DLMM buy wall tracker disabled (set DLMM_BUYWALL_ENABLED=true to enable)");
   }
@@ -159,7 +182,9 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     logger.info(`Received ${signal}, shutting down...`);
     dlmmListener?.stop();
+    wallMonitor?.stop();
     dashboardServer?.stop();
+    dlmmStore.flush();
     await telegramBot.stop();
     process.exit(0);
   };
@@ -174,7 +199,9 @@ async function gracefulExit(reason: string, err?: unknown): Promise<void> {
   logger.error(`${reason}`, { error: err ? String(err) : "unknown" });
   try {
     dlmmListener?.stop();
+    wallMonitor?.stop();
     dashboardServer?.stop();
+    dlmmStore.flush();
     if (telegramBot) await telegramBot.stop();
   } catch (cleanupErr) {
     logger.error("Error during cleanup", { error: String(cleanupErr) });

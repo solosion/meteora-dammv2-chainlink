@@ -162,6 +162,23 @@ describe("computeSignalScore", () => {
     expect(tinyVsVolume).toBe(base - 15);
   });
 
+  it("concentration is the dominant factor", () => {
+    const concentrated = computeSignalScore({
+      solValue: 100,
+      distancePct: 5,
+      solPerBin: 20,
+      solFraction: 1.0,
+    });
+    const spread = computeSignalScore({
+      solValue: 100,
+      distancePct: 5,
+      solPerBin: 0.5,
+      solFraction: 1.0,
+    });
+    // Same wall, only concentration differs — must move the score by 20+ points
+    expect(concentrated - spread).toBeGreaterThanOrEqual(20);
+  });
+
   it("clamps to 0-100 range", () => {
     const s1 = computeSignalScore({ solValue: 0, distancePct: 100, solPerBin: 0, solFraction: 0 });
     const s2 = computeSignalScore({ solValue: 100000, distancePct: 0, solPerBin: 1000, solFraction: 1, wallToVolumePct: 100 });
