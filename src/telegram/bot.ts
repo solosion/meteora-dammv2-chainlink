@@ -116,7 +116,7 @@ export class TelegramBot {
     logger.info("Telegram bot started (manual long-polling, no Telegraf)");
 
     await this.notifyAdmin(
-      "🟢 <b>Bot gestartet</b>\nMeteora DAMM v2 Pool-Watcher ist online."
+      "🟢 <b>Bot gestartet</b>\nDLMM Buy Wall Tracker ist online."
     );
   }
 
@@ -126,7 +126,7 @@ export class TelegramBot {
   async stop(): Promise<void> {
     if (this.isRunning) {
       await this.notifyAdmin(
-        "🔴 <b>Bot gestoppt</b>\nMeteora DAMM v2 Pool-Watcher wird heruntergefahren."
+        "🔴 <b>Bot gestoppt</b>\nDLMM Buy Wall Tracker wird heruntergefahren."
       );
     }
 
@@ -244,18 +244,11 @@ export class TelegramBot {
   ): Promise<void> {
     const command = text.trim().toLowerCase();
 
-    if (command === "/status") {
-      await ctx.reply("🟢 Bot ist aktiv. Pool-Watcher läuft.");
-    } else if (command === "/help") {
+    if (command === "/help") {
       await ctx.reply(
         "📋 <b>Verfügbare Befehle:</b>\n\n" +
-          "/status - Bot-Status anzeigen\n" +
-          "/positions - Offene Positionen anzeigen\n" +
-          "/balance - Wallet-Balance anzeigen\n" +
-          "/mcap &lt;token&gt; - Market Cap abfragen\n" +
-          "/closeall - Alle Positionen schließen\n" +
-          "/history - Geschlossene Positionen\n" +
-          "/dlmm_buywalls - DLMM Buy Wall Tracker Status\n" +
+          "/status - Tracker-Status anzeigen\n" +
+          "/walls - Letzte erkannte Buy Walls\n" +
           "/help - Diese Hilfe anzeigen",
         { parse_mode: "HTML" }
       );

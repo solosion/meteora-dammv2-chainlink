@@ -1,10 +1,10 @@
-# Meteora DAMM v2 Bot - Development Guidelines
+# DLMM Buy Wall Tracker - Development Guidelines
 
 ## Deployment Reminder
 After every commit & push, ALWAYS provide the user with the deploy commands for the server:
 
 ```bash
-cd /opt/meteora-dammv2-bot
+cd /opt/dlmm-buywall-tracker
 pkill -9 -f "node dist/index.js"
 git pull origin <branch-name>
 npm install
@@ -24,6 +24,6 @@ The user will forget to pull the new code otherwise.
 - `npm test` runs Jest tests
 
 ## Bot runs on
-- Server: `/opt/meteora-dammv2-bot`
+- Server: `/opt/dlmm-buywall-tracker`
 - Start: `nohup node dist/index.js > bot.log 2>&1 &`
 - Logs: `tail -f bot.log`

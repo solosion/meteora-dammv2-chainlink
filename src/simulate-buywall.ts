@@ -3,7 +3,7 @@
  * Zeigt: Filter-Entscheidung, Signal-Score, fertige Telegram-Nachricht.
  * Braucht keine .env / keine API-Keys.
  *
- * Usage: npm run simulate:buywall
+ * Usage: npm run simulate
  */
 import { isDlmmBuyWall } from "./dlmm-buywall/filter";
 import { formatDlmmBuyWallMessage } from "./dlmm-buywall/notifier";
