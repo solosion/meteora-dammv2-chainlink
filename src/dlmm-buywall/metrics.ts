@@ -89,7 +89,9 @@ export function classifySupportStrength(distancePct: number): string {
  *  3. Concentration (SOL per bin — dense walls are harder to break)
  *  4. Single-sidedness (100% SOL = pure conviction)
  *
- * Optional volume bonus: if wall-to-volume ratio is known and high, boost by up to 10.
+ * Volume context (when wall-to-volume ratio is known): ≥5% adds up to 10
+ * bonus points, <1% subtracts 15 — a wall that's tiny vs. daily volume
+ * cannot hold the price.
  */
 export function computeSignalScore(params: {
   solValue: number;
@@ -114,10 +116,15 @@ export function computeSignalScore(params: {
 
   let score = sizeScore + proxScore + concScore + ssScore;
 
-  // Volume bonus
+  // Volume context: a wall that is big relative to the token's 24h volume
+  // can actually hold the price (bonus); a wall that is tiny relative to
+  // volume gets eaten through in minutes (malus).
   if (params.wallToVolumePct !== undefined && params.wallToVolumePct > 0) {
-    const volBonus = Math.min(10, params.wallToVolumePct * 0.5);
-    score += volBonus;
+    if (params.wallToVolumePct >= 5) {
+      score += Math.min(10, params.wallToVolumePct * 0.5);
+    } else if (params.wallToVolumePct < 1) {
+      score -= 15;
+    }
   }
 
   return Math.round(Math.min(100, Math.max(0, score)));

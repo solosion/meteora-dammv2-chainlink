@@ -96,7 +96,7 @@ function registerAdminCommands(): void {
         `Richtung: ${config.dlmmBuywall.direction}\n` +
         `Einseitig-Schwelle: ${(config.dlmmBuywall.singleSideThreshold * 100).toFixed(0)}%\n` +
         (config.dashboard.enabled
-          ? `\n📊 Dashboard: http://0.0.0.0:${config.dashboard.port}`
+          ? `\n📊 Dashboard: Port ${config.dashboard.port} (http://SERVER_IP:${config.dashboard.port})`
           : ""),
       { parse_mode: "HTML" }
     );

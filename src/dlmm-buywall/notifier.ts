@@ -27,13 +27,17 @@ export function formatDlmmBuyWallMessage(wall: WallRecord): string {
     wall.solPriceUsd ?? 0
   );
 
-  const score = computeSignalScore({
-    solValue: wall.solValue,
-    distancePct: metrics.distancePct,
-    solPerBin: wall.solPerBin,
-    solFraction: wall.solFraction,
-    wallToVolumePct: relTier.wallToVolumePct || undefined,
-  });
+  // Use the score computed at detection time so Telegram and dashboard
+  // always show the same number; compute only as fallback.
+  const score =
+    wall.signalScore ??
+    computeSignalScore({
+      solValue: wall.solValue,
+      distancePct: metrics.distancePct,
+      solPerBin: wall.solPerBin,
+      solFraction: wall.solFraction,
+      wallToVolumePct: relTier.wallToVolumePct || undefined,
+    });
   const sl = scoreLabel(score);
 
   const headline = isSupport
@@ -59,7 +63,7 @@ export function formatDlmmBuyWallMessage(wall: WallRecord): string {
   const marketLine = marketLines.length > 0 ? `📊 ${marketLines.join(" | ")}\n` : "";
 
   const volumeLine = wall.volume24hUsd && wall.volume24hUsd > 0
-    ? `📉 <b>Vol 24h:</b> $${formatUsd(wall.volume24hUsd)} — Wall ist ${relTier.label} (${relTier.wallToVolumePct.toFixed(1)}% des Volumens)\n`
+    ? `🌊 <b>Vol 24h:</b> $${formatUsd(wall.volume24hUsd)} — Wall ist ${relTier.label} (${relTier.wallToVolumePct.toFixed(1)}% des Volumens)\n`
     : "";
 
   const concLine = `🎯 <b>Konzentration:</b> ${wall.solPerBin.toFixed(1)} SOL/Bin (${wall.binCount} Bins)\n`;

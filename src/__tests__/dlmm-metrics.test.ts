@@ -145,6 +145,23 @@ describe("computeSignalScore", () => {
     expect(withVol).toBeGreaterThan(base);
   });
 
+  it("malus when wall is tiny relative to volume (< 1%)", () => {
+    const base = computeSignalScore({
+      solValue: 95,
+      distancePct: 1,
+      solPerBin: 6,
+      solFraction: 1.0,
+    });
+    const tinyVsVolume = computeSignalScore({
+      solValue: 95,
+      distancePct: 1,
+      solPerBin: 6,
+      solFraction: 1.0,
+      wallToVolumePct: 0.8,
+    });
+    expect(tinyVsVolume).toBe(base - 15);
+  });
+
   it("clamps to 0-100 range", () => {
     const s1 = computeSignalScore({ solValue: 0, distancePct: 100, solPerBin: 0, solFraction: 0 });
     const s2 = computeSignalScore({ solValue: 100000, distancePct: 0, solPerBin: 1000, solFraction: 1, wallToVolumePct: 100 });

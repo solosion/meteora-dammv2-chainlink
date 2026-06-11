@@ -82,8 +82,14 @@ export class DlmmPositionListener {
 
   stop(): void {
     this.stopped = true;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
     if (this.subscriptionId !== null) {
       getConnection().removeOnLogsListener(this.subscriptionId);
       this.subscriptionId = null;
@@ -123,6 +129,10 @@ export class DlmmPositionListener {
 
   reconnect(): void {
     if (this.stopped) return;
+    // A reconnect is already scheduled — don't stack a second subscribe()
+    // (the heartbeat fires every 15s and would otherwise create duplicate
+    // subscriptions during the backoff window).
+    if (this.reconnectTimer) return;
     if (this.subscriptionId !== null) {
       try {
         getConnection().removeOnLogsListener(this.subscriptionId);
@@ -136,7 +146,10 @@ export class DlmmPositionListener {
     logger.warn(`DLMM WebSocket disconnected, reconnecting in ${delay}ms...`, {
       attempt: this.reconnectAttempts,
     });
-    this.reconnectTimer = setTimeout(() => this.subscribe(), delay);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.subscribe();
+    }, delay);
   }
 
   private trackTxSig(sig: string): boolean {
@@ -157,16 +170,29 @@ export class DlmmPositionListener {
     this.counters.logBatchesMatched++;
 
     const connection = getConnection();
-    const tx = await connection.getParsedTransaction(logs.signature, {
-      maxSupportedTransactionVersion: 0,
-      commitment: "confirmed",
-    });
+    // Fresh transactions sometimes aren't queryable yet on the RPC node that
+    // delivered the log — retry briefly instead of losing the wall.
+    let tx = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      tx = await connection.getParsedTransaction(logs.signature, {
+        maxSupportedTransactionVersion: 0,
+        commitment: "confirmed",
+      });
+      if (tx) break;
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 2000));
+    }
     if (!tx || !tx.meta) return;
     this.counters.txAnalyzed++;
 
     const accountKeys = tx.transaction.message.accountKeys;
     const pubkeys = accountKeys.map((ak) => ak.pubkey);
-    const acctInfos = await connection.getMultipleAccountsInfo(pubkeys);
+    // getMultipleAccountsInfo is capped at 100 keys per call — chunk for
+    // ALT-heavy transactions that reference more accounts.
+    const acctInfos: Awaited<ReturnType<typeof connection.getMultipleAccountsInfo>> = [];
+    for (let i = 0; i < pubkeys.length; i += 100) {
+      const chunk = await connection.getMultipleAccountsInfo(pubkeys.slice(i, i + 100));
+      acctInfos.push(...chunk);
+    }
 
     for (let i = 0; i < pubkeys.length; i++) {
       const pubkey = pubkeys[i];

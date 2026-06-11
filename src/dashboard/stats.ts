@@ -40,6 +40,7 @@ export function computeWallStats(walls: StoredWall[], now: Date = new Date()): W
   let biggest24 = 0;
   let solAll = 0;
   let scoreSum24 = 0;
+  let scoredCount24 = 0;
   let highScoreCount24 = 0;
 
   // 24 hourly buckets, oldest first
@@ -67,6 +68,7 @@ export function computeWallStats(walls: StoredWall[], now: Date = new Date()): W
       if (wall.solValue > biggest24) biggest24 = wall.solValue;
       if (typeof wall.signalScore === "number") {
         scoreSum24 += wall.signalScore;
+        scoredCount24++;
         if (wall.signalScore >= 60) highScoreCount24++;
       }
 
@@ -112,7 +114,7 @@ export function computeWallStats(walls: StoredWall[], now: Date = new Date()): W
       count: count24,
       totalSol: sol24,
       biggestSol: biggest24,
-      avgScore: count24 > 0 ? Math.round(scoreSum24 / count24) : 0,
+      avgScore: scoredCount24 > 0 ? Math.round(scoreSum24 / scoredCount24) : 0,
       highScoreCount: highScoreCount24,
     },
     allTime: { count: walls.length, totalSol: solAll },

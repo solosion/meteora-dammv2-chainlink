@@ -55,6 +55,7 @@ const scenarios: Array<{ name: string; wall: WallRecord }> = [
       solValue: 520,
       totalYAmount: 520,
       solPerBin: 520 / 41,
+      tokenXMint: "MOONm1nt1111111111111111111111111111111111111",
       tokenSymbol: "MOON",
       tokenName: "MoonCoin",
       marketCapUsd: 850_000,
@@ -64,7 +65,7 @@ const scenarios: Array<{ name: string; wall: WallRecord }> = [
     }),
   },
   {
-    name: "Szenario 2: Mittlere Wall, gutes Token-Volumen (GUTES SIGNAL)",
+    name: "Szenario 2: Mittlere Wall, hohes Token-Volumen → Volumen-Malus (GUTES SIGNAL)",
     wall: makeWall({
       positionAddress: "3mNoPos8eB2lVuA1bC3dE4fG5hJ7lM9oP1qR2sT3uV4w",
       solValue: 95,
@@ -75,6 +76,7 @@ const scenarios: Array<{ name: string; wall: WallRecord }> = [
       upperBinId: -41,
       rangeMinPrice: 0.000405,
       rangeMaxPrice: 0.000416,
+      tokenXMint: "PEPE2m1nt111111111111111111111111111111111111",
       tokenSymbol: "PEPE2",
       tokenName: "Pepe Two",
       marketCapUsd: 2_400_000,
