@@ -41,4 +41,13 @@ export const config = {
     intervalSeconds: parseInt(optional("MONITOR_INTERVAL_SECONDS", "30"), 10),
   },
   logLevel: optional("LOG_LEVEL", "info"),
+  dlmmBuywall: {
+    enabled: optional("DLMM_BUYWALL_ENABLED", "false").toLowerCase() === "true",
+    minSol: parseFloat(optional("DLMM_BUYWALL_MIN_SOL", "50")),
+    direction: optional("DLMM_BUYWALL_DIRECTION", "below").toLowerCase() as
+      "above" | "below" | "either",
+    singleSideThreshold: parseFloat(
+      optional("DLMM_BUYWALL_SINGLE_SIDE_THRESHOLD", "0.95")
+    ),
+  },
 };

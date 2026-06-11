@@ -18,10 +18,20 @@ import {
 import { getTokenMarketData } from "./market/marketcap";
 import { getPoolFromDataApi, DataApiPool } from "./meteora/dataapi";
 import { PoolWatcher, NewPoolEvent } from "./watcher/poolwatcher";
+import { DlmmPositionListener } from "./listener/dlmm-position-listener";
+import { isDlmmBuyWall } from "./dlmm-buywall/filter";
+import { createDlmmBuyWallStore } from "./dlmm-buywall/store";
+import { formatDlmmBuyWallMessage } from "./dlmm-buywall/notifier";
+import { DlmmPositionSnapshot, DetectedDlmmBuyWall } from "./dlmm-buywall/types";
+import * as path from "path";
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let telegramBot: TelegramBot;
 let poolWatcher: PoolWatcher | null = null;
+let dlmmListener: DlmmPositionListener | null = null;
+const dlmmStore = createDlmmBuyWallStore(
+  path.join(process.cwd(), "data", "dlmm-buywalls.json")
+);
 
 /**
  * Fetch pool info from Meteora Data API with retries.
@@ -45,6 +55,37 @@ async function fetchPoolDataWithRetry(
     }
   }
   return null;
+}
+
+async function handleDlmmBuyWall(snapshot: DlmmPositionSnapshot): Promise<void> {
+  if (dlmmStore.hasSeen(snapshot.positionAddress)) return;
+
+  const verdict = isDlmmBuyWall(snapshot, {
+    minSol: config.dlmmBuywall.minSol,
+    direction: config.dlmmBuywall.direction,
+    singleSideThreshold: config.dlmmBuywall.singleSideThreshold,
+  });
+  if (!verdict.matched) {
+    logger.debug("DLMM position not a buy wall", {
+      position: snapshot.positionAddress.substring(0, 12),
+      reason: verdict.reason,
+    });
+    return;
+  }
+
+  dlmmStore.recordSeen(snapshot.positionAddress, {
+    lbPair: snapshot.lbPairAddress,
+    sol: snapshot.solValue,
+    reason: verdict.reason,
+  });
+
+  const wall: DetectedDlmmBuyWall = { ...snapshot, matchedReason: verdict.reason };
+  logger.info("DLMM buy wall detected", {
+    position: snapshot.positionAddress,
+    sol: snapshot.solValue.toFixed(2),
+    lbPair: snapshot.lbPairAddress,
+  });
+  await telegramBot.notifyAdmin(formatDlmmBuyWallMessage(wall));
 }
 
 /**
@@ -343,6 +384,20 @@ function registerAdminCommands(): void {
     );
   });
 
+  // /dlmm_buywalls - Show DLMM buy wall tracker status
+  telegramBot.registerCommand("dlmm_buywalls", async (ctx) => {
+    const count = dlmmStore.size();
+    await ctx.reply(
+      `🚧 <b>DLMM Buy Wall Tracker</b>\n` +
+        `Enabled: ${config.dlmmBuywall.enabled ? "yes" : "no"}\n` +
+        `Min SOL: ${config.dlmmBuywall.minSol}\n` +
+        `Direction: ${config.dlmmBuywall.direction}\n` +
+        `Single-side threshold: ${(config.dlmmBuywall.singleSideThreshold * 100).toFixed(0)}%\n` +
+        `Walls tracked: ${count}`,
+      { parse_mode: "HTML" }
+    );
+  });
+
   // /history - Show closed positions
   telegramBot.registerCommand("history", async (ctx) => {
     const allPos = getAllPositions().filter((p) => p.status === "closed");
@@ -401,11 +456,25 @@ async function main(): Promise<void> {
     logger.info("On-chain pool watcher enabled");
   }
 
+  // Start DLMM buy wall tracker
+  if (config.dlmmBuywall.enabled) {
+    dlmmListener = new DlmmPositionListener();
+    dlmmListener.onPositionSnapshot(handleDlmmBuyWall);
+    dlmmListener.start();
+    logger.info("DLMM buy wall tracker enabled", {
+      minSol: config.dlmmBuywall.minSol,
+      direction: config.dlmmBuywall.direction,
+    });
+  } else {
+    logger.info("DLMM buy wall tracker disabled (set DLMM_BUYWALL_ENABLED=true to enable)");
+  }
+
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info(`Received ${signal}, shutting down...`);
     stopMonitor();
     poolWatcher?.stop();
+    dlmmListener?.stop();
     await telegramBot.stop();
     process.exit(0);
   };
@@ -423,6 +492,7 @@ async function gracefulExit(reason: string, err?: unknown): Promise<void> {
   try {
     stopMonitor();
     poolWatcher?.stop();
+    dlmmListener?.stop();
     if (telegramBot) await telegramBot.stop();
   } catch (cleanupErr) {
     logger.error("Error during cleanup", { error: String(cleanupErr) });

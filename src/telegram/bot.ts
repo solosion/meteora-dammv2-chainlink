@@ -255,6 +255,7 @@ export class TelegramBot {
           "/mcap &lt;token&gt; - Market Cap abfragen\n" +
           "/closeall - Alle Positionen schließen\n" +
           "/history - Geschlossene Positionen\n" +
+          "/dlmm_buywalls - DLMM Buy Wall Tracker Status\n" +
           "/help - Diese Hilfe anzeigen",
         { parse_mode: "HTML" }
       );
