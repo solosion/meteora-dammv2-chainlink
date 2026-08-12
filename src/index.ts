@@ -1,13 +1,29 @@
 import { PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import BN from "bn.js";
+import * as path from "path";
 import { config } from "./config";
 import { logger } from "./utils/logger";
 import { TelegramBot } from "./telegram/bot";
-import { ParsedAlert } from "./telegram/parser";
+import { PoolListener } from "./listener/pool-listener";
+import { DlmmPositionListener } from "./listener/dlmm-position-listener";
+import { isDlmmBuyWall } from "./dlmm-buywall/filter";
+import { createDlmmBuyWallStore } from "./dlmm-buywall/store";
+import { formatDlmmBuyWallMessage } from "./dlmm-buywall/notifier";
+import { DlmmPositionSnapshot, DetectedDlmmBuyWall } from "./dlmm-buywall/types";
+import {
+  shouldTailPool,
+  PoolCandidate,
+  FilterConfig,
+} from "./filter/pool-filter";
 import { getWallet, getWalletBalance } from "./solana/wallet";
-import { getPoolByAddress, findPoolForToken } from "./meteora/pools";
+import { getPoolByAddress } from "./meteora/pools";
 import { openPosition } from "./meteora/positions";
-import { checkCanOpenPosition, monitorPositions, closeAllPositions } from "./risk/manager";
+import { swapSolForToken, getTokenBalance } from "./swap/jupiter";
+import {
+  checkCanOpenPosition,
+  monitorPositions,
+  closeAllPositions,
+} from "./risk/manager";
 import {
   addPosition,
   getOpenPositions,
@@ -16,83 +32,163 @@ import {
   getTotalExposureSol,
 } from "./tracker/store";
 
+const SOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
+
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 let telegramBot: TelegramBot;
+let poolListener: PoolListener;
+let dlmmListener: DlmmPositionListener | null = null;
+const dlmmStore = createDlmmBuyWallStore(
+  path.join(process.cwd(), "data", "dlmm-buywalls.json")
+);
 
-/**
- * Handle an incoming alert: find pool, check risk, open position.
- */
-async function handleAlert(alert: ParsedAlert): Promise<void> {
-  logger.info("Processing alert", {
-    tokens: alert.tokenMints.map((t) => t.toBase58()),
-    pool: alert.poolAddress?.toBase58(),
+async function handleDlmmBuyWall(snapshot: DlmmPositionSnapshot): Promise<void> {
+  if (dlmmStore.hasSeen(snapshot.positionAddress)) return;
+
+  const verdict = isDlmmBuyWall(snapshot, {
+    minSol: config.dlmmBuywall.minSol,
+    direction: config.dlmmBuywall.direction,
+    singleSideThreshold: config.dlmmBuywall.singleSideThreshold,
   });
-
-  // If a pool address was provided directly, use it
-  if (alert.poolAddress) {
-    await processPool(alert.poolAddress);
+  if (!verdict.matched) {
+    logger.debug("DLMM position not a buy wall", {
+      position: snapshot.positionAddress.substring(0, 12),
+      reason: verdict.reason,
+    });
     return;
   }
 
-  // Otherwise, search for pools for each token mint
-  for (const tokenMint of alert.tokenMints) {
-    const pool = await findPoolForToken(tokenMint);
-    if (pool) {
-      await processPool(pool.address);
-    } else {
-      await telegramBot.notifyAdmin(
-        `⚠️ Kein DAMM v2 Pool gefunden für Token <code>${tokenMint.toBase58()}</code>`
-      );
-    }
-  }
+  // Record AFTER verdict — only dedup confirmed buy walls.
+  // Still synchronous: no await between hasSeen and recordSeen, so no TOCTOU window.
+  dlmmStore.recordSeen(snapshot.positionAddress, {
+    lbPair: snapshot.lbPairAddress,
+    sol: snapshot.solValue,
+    reason: verdict.reason,
+  });
+
+  const wall: DetectedDlmmBuyWall = { ...snapshot, matchedReason: verdict.reason };
+  logger.info("🚧 DLMM buy wall detected", {
+    position: snapshot.positionAddress,
+    sol: snapshot.solValue.toFixed(2),
+    lbPair: snapshot.lbPairAddress,
+  });
+  await telegramBot.notifyAdmin(formatDlmmBuyWallMessage(wall));
 }
 
 /**
- * Process a specific pool: check risks and open position.
+ * Handle a newly detected pool candidate.
  */
-async function processPool(poolAddress: PublicKey): Promise<void> {
-  const pool = await getPoolByAddress(poolAddress);
-  if (!pool) {
-    await telegramBot.notifyAdmin(
-      `❌ Pool <code>${poolAddress.toBase58()}</code> konnte nicht geladen werden`
-    );
+async function handleNewPool(candidate: PoolCandidate): Promise<void> {
+  logger.info("Evaluating new pool", {
+    pool: candidate.poolAddress,
+    creator: candidate.creator,
+    liquiditySol: candidate.initialLiquiditySol.toFixed(4),
+  });
+
+  // Apply filters
+  const filterConfig: FilterConfig = {
+    minPoolLiquiditySol: config.filter.minPoolLiquiditySol,
+    creatorWhitelist: config.filter.creatorWhitelist,
+    creatorBlacklist: config.filter.creatorBlacklist,
+  };
+  const filterResult = shouldTailPool(candidate, filterConfig);
+  if (!filterResult.accepted) {
+    logger.info("Pool rejected by filter", {
+      pool: candidate.poolAddress,
+      reason: filterResult.reason,
+    });
     return;
   }
 
-  // Determine position size (use max allowed per position)
-  const positionSizeSol = config.risk.maxPositionSizeSol;
-
   // Risk check
+  const positionSizeSol = config.position.sizeSol;
   const riskCheck = await checkCanOpenPosition(positionSizeSol);
   if (!riskCheck.allowed) {
     await telegramBot.notifyAdmin(
-      `🚫 <b>Position abgelehnt</b>\n` +
-        `Pool: <code>${poolAddress.toBase58()}</code>\n` +
-        `Grund: ${riskCheck.reason}`
+      `\ud83d\udeab <b>Position rejected</b>\n` +
+        `Pool: <code>${candidate.poolAddress}</code>\n` +
+        `Reason: ${riskCheck.reason}`
     );
     return;
   }
 
-  // Calculate token amounts based on position size
-  // For a balanced position, we split the SOL value between both tokens
-  const solLamports = new BN(positionSizeSol * LAMPORTS_PER_SOL);
-  const halfSol = solLamports.div(new BN(2));
+  // Fetch pool state
+  const poolAddress = new PublicKey(candidate.poolAddress);
+  const pool = await getPoolByAddress(poolAddress);
+  if (!pool) {
+    logger.error("Could not fetch pool for position opening", {
+      pool: candidate.poolAddress,
+    });
+    return;
+  }
 
-  // For simplicity: if one side is SOL, use half for SOL and half for the other token
-  // The SDK's liquidity delta calculation handles the actual split
-  const maxTokenA = halfSol;
-  const maxTokenB = halfSol;
+  // Determine which side is SOL and which is the token to acquire
+  const isSolA = pool.tokenAMint.equals(SOL_MINT);
+  const tokenMint = isSolA ? pool.tokenBMint : pool.tokenAMint;
 
   try {
     await telegramBot.notifyAdmin(
-      `⏳ <b>Position wird eröffnet...</b>\n` +
-        `Pool: <code>${poolAddress.toBase58()}</code>\n` +
-        `Größe: ${positionSizeSol} SOL`
+      `\u23f3 <b>Tailing new pool...</b>\n` +
+        `Pool: <code>${candidate.poolAddress}</code>\n` +
+        `Creator: <code>${candidate.creator}</code>\n` +
+        `Liquidity: ${candidate.initialLiquiditySol.toFixed(2)} SOL\n` +
+        `Token: <code>${tokenMint.toBase58()}</code>\n` +
+        `Size: ${positionSizeSol} SOL`
     );
+
+    // Step 1: Swap half the SOL for the paired token via Jupiter
+    const halfSol = positionSizeSol / 2;
+    logger.info("Step 1: Swapping SOL for token", {
+      solAmount: halfSol,
+      tokenMint: tokenMint.toBase58(),
+    });
+
+    const swapResult = await swapSolForToken(
+      tokenMint,
+      halfSol,
+      config.swap.slippageBps
+    );
+    if (!swapResult.success) {
+      logger.error("Jupiter swap failed", { error: swapResult.error });
+      await telegramBot.notifyAdmin(
+        `\u274c <b>Swap failed</b>\n` +
+          `Pool: <code>${candidate.poolAddress}</code>\n` +
+          `Error: <code>${swapResult.error}</code>`
+      );
+      return;
+    }
+
+    logger.info("Swap successful", {
+      txSig: swapResult.txSignature,
+      outputAmount: swapResult.outputAmount,
+    });
+
+    // Step 2: Get actual token balance after swap
+    const tokenBalance = await getTokenBalance(tokenMint);
+    if (tokenBalance.amount <= 0) {
+      logger.error("Token balance 0 after swap");
+      await telegramBot.notifyAdmin(
+        `\u274c <b>Token balance 0 after swap</b>\n` +
+          `Pool: <code>${candidate.poolAddress}</code>`
+      );
+      return;
+    }
+
+    // Step 3: Open LP position with actual balances
+    const solForLp = new BN(Math.floor(halfSol * LAMPORTS_PER_SOL));
+    const tokenRaw = new BN(swapResult.outputAmount.toString());
+
+    // Assign to correct sides (A or B) based on pool ordering
+    const maxTokenA = isSolA ? solForLp : tokenRaw;
+    const maxTokenB = isSolA ? tokenRaw : solForLp;
+
+    logger.info("Step 2: Opening LP position", {
+      maxTokenA: maxTokenA.toString(),
+      maxTokenB: maxTokenB.toString(),
+    });
 
     const result = await openPosition(pool, maxTokenA, maxTokenB);
 
-    // Track the position
     const tracked = addPosition({
       poolAddress: poolAddress.toBase58(),
       positionAddress: result.positionAddress.toBase58(),
@@ -107,35 +203,31 @@ async function processPool(poolAddress: PublicKey): Promise<void> {
     });
 
     await telegramBot.notifyAdmin(
-      `✅ <b>Position eröffnet!</b>\n` +
+      `\u2705 <b>Position opened!</b>\n` +
         `ID: <code>${tracked.id}</code>\n` +
-        `Pool: <code>${poolAddress.toBase58()}</code>\n` +
+        `Pool: <code>${candidate.poolAddress}</code>\n` +
         `Position: <code>${result.positionAddress.toBase58()}</code>\n` +
-        `Größe: ${positionSizeSol} SOL\n` +
+        `Swap: ${halfSol} SOL \u2192 ${tokenBalance.amount.toFixed(2)} tokens\n` +
+        `LP: ${halfSol} SOL + tokens\n` +
         `TX: <code>${result.txSignature}</code>\n` +
-        `Stop-Loss: -${config.risk.stopLossPercent}% | Take-Profit: +${config.risk.takeProfitPercent}%`
+        `SL: -${config.risk.stopLossPercent}% | TP: +${config.risk.takeProfitPercent}% | Max: ${config.risk.maxHoldMinutes}min`
     );
   } catch (err) {
     logger.error("Failed to open position", { error: String(err) });
     await telegramBot.notifyAdmin(
-      `❌ <b>Position fehlgeschlagen</b>\n` +
-        `Pool: <code>${poolAddress.toBase58()}</code>\n` +
-        `Fehler: <code>${String(err)}</code>`
+      `\u274c <b>Position failed</b>\n` +
+        `Pool: <code>${candidate.poolAddress}</code>\n` +
+        `Error: <code>${String(err)}</code>`
     );
   }
 }
 
-/**
- * Start the position monitor loop.
- */
 function startMonitor(): void {
   if (monitorInterval) return;
 
   monitorInterval = setInterval(async () => {
     try {
       const result = await monitorPositions();
-
-      // Send alerts to admin
       for (const alert of result.alerts) {
         await telegramBot.notifyAdmin(alert);
       }
@@ -157,11 +249,7 @@ function stopMonitor(): void {
   }
 }
 
-/**
- * Register admin Telegram commands.
- */
 function registerAdminCommands(): void {
-  // /status - Show bot status
   telegramBot.registerCommand("status", async (ctx) => {
     const balance = await getWalletBalance();
     const openPos = getOpenPositions();
@@ -169,97 +257,106 @@ function registerAdminCommands(): void {
     const exposure = getTotalExposureSol();
 
     await ctx.reply(
-      `📊 <b>Bot Status</b>\n\n` +
-        `💰 Balance: ${balance.toFixed(4)} SOL\n` +
-        `📈 Offene Positionen: ${openPos.length}/${config.risk.maxOpenPositions}\n` +
-        `💵 Exposure: ${exposure.toFixed(4)}/${config.risk.maxTotalExposureSol} SOL\n` +
-        `📉 Gesamt P&L: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL\n` +
-        `⚙️ Max Position: ${config.risk.maxPositionSizeSol} SOL\n` +
-        `🛑 Stop-Loss: -${config.risk.stopLossPercent}%\n` +
-        `🎯 Take-Profit: +${config.risk.takeProfitPercent}%`,
+      `\ud83d\udcca <b>Pool Tailer Status</b>\n\n` +
+        `\ud83d\udcb0 Balance: ${balance.toFixed(4)} SOL\n` +
+        `\ud83d\udcc8 Open Positions: ${openPos.length}/${config.position.maxOpenPositions}\n` +
+        `\ud83d\udcb5 Exposure: ${exposure.toFixed(4)}/${config.position.maxTotalExposureSol} SOL\n` +
+        `\ud83d\udcc9 Total P&L: ${totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(4)} SOL\n` +
+        `\u2699\ufe0f Position Size: ${config.position.sizeSol} SOL\n` +
+        `\ud83d\udd0d Min Liquidity: ${config.filter.minPoolLiquiditySol} SOL\n` +
+        `\ud83d\uded1 SL: -${config.risk.stopLossPercent}% | TP: +${config.risk.takeProfitPercent}% | Hold: ${config.risk.maxHoldMinutes}min`,
       { parse_mode: "HTML" }
     );
   });
 
-  // /positions - Show open positions
   telegramBot.registerCommand("positions", async (ctx) => {
     const openPos = getOpenPositions();
     if (openPos.length === 0) {
-      await ctx.reply("📭 Keine offenen Positionen.");
+      await ctx.reply("\ud83d\udced No open positions.");
       return;
     }
 
-    let msg = `📋 <b>Offene Positionen (${openPos.length})</b>\n\n`;
+    let msg = `\ud83d\udccb <b>Open Positions (${openPos.length})</b>\n\n`;
     for (const pos of openPos) {
+      const holdMin = (
+        (Date.now() - new Date(pos.openedAt).getTime()) /
+        60_000
+      ).toFixed(0);
       msg +=
         `<b>${pos.id}</b>\n` +
         `  Pool: <code>${pos.poolAddress.substring(0, 12)}...</code>\n` +
-        `  Größe: ${pos.entryValueSol} SOL\n` +
-        `  Eröffnet: ${new Date(pos.openedAt).toLocaleString("de-DE")}\n\n`;
+        `  Size: ${pos.entryValueSol} SOL\n` +
+        `  Hold: ${holdMin}min / ${config.risk.maxHoldMinutes}min\n\n`;
     }
 
     await ctx.reply(msg, { parse_mode: "HTML" });
   });
 
-  // /balance - Show wallet balance
   telegramBot.registerCommand("balance", async (ctx) => {
     const wallet = getWallet();
     const balance = await getWalletBalance();
     await ctx.reply(
-      `💰 <b>Wallet</b>\n` +
-        `Adresse: <code>${wallet.publicKey.toBase58()}</code>\n` +
+      `\ud83d\udcb0 <b>Wallet</b>\n` +
+        `Address: <code>${wallet.publicKey.toBase58()}</code>\n` +
         `Balance: ${balance.toFixed(4)} SOL`,
       { parse_mode: "HTML" }
     );
   });
 
-  // /closeall - Close all positions
   telegramBot.registerCommand("closeall", async (ctx) => {
     const openPos = getOpenPositions();
     if (openPos.length === 0) {
-      await ctx.reply("📭 Keine offenen Positionen zum Schließen.");
+      await ctx.reply("\ud83d\udced No open positions to close.");
       return;
     }
-
-    await ctx.reply(
-      `⏳ Schließe ${openPos.length} Position(en)...`
-    );
-
+    await ctx.reply(`\u23f3 Closing ${openPos.length} position(s)...`);
     const results = await closeAllPositions();
     await ctx.reply(
-      `📋 <b>Ergebnis:</b>\n` + results.join("\n"),
+      `\ud83d\udccb <b>Results:</b>\n` + results.join("\n"),
       { parse_mode: "HTML" }
     );
   });
 
-  // /history - Show closed positions
   telegramBot.registerCommand("history", async (ctx) => {
     const allPos = getAllPositions().filter((p) => p.status === "closed");
     if (allPos.length === 0) {
-      await ctx.reply("📭 Keine geschlossenen Positionen.");
+      await ctx.reply("\ud83d\udced No closed positions.");
       return;
     }
 
     const last10 = allPos.slice(-10);
-    let msg = `📋 <b>Letzte ${last10.length} geschlossene Positionen</b>\n\n`;
+    let msg = `\ud83d\udccb <b>Last ${last10.length} closed positions</b>\n\n`;
     for (const pos of last10) {
-      const pnl = pos.pnlSol !== undefined ? `${pos.pnlSol >= 0 ? "+" : ""}${pos.pnlSol.toFixed(4)} SOL` : "N/A";
+      const pnl =
+        pos.pnlSol !== undefined
+          ? `${pos.pnlSol >= 0 ? "+" : ""}${pos.pnlSol.toFixed(4)} SOL`
+          : "N/A";
       msg +=
         `<b>${pos.id}</b>\n` +
-        `  Grund: ${pos.closeReason}\n` +
+        `  Reason: ${pos.closeReason}\n` +
         `  P&L: ${pnl}\n` +
-        `  Geschlossen: ${pos.closedAt ? new Date(pos.closedAt).toLocaleString("de-DE") : "N/A"}\n\n`;
+        `  Closed: ${pos.closedAt || "N/A"}\n\n`;
     }
 
     await ctx.reply(msg, { parse_mode: "HTML" });
   });
+
+  telegramBot.registerCommand("dlmm_buywalls", async (ctx) => {
+    const count = dlmmStore.size();
+    await ctx.reply(
+      `🚧 <b>DLMM Buy Wall Tracker</b>\n` +
+        `Enabled: ${config.dlmmBuywall.enabled ? "yes" : "no"}\n` +
+        `Min SOL: ${config.dlmmBuywall.minSol}\n` +
+        `Direction: ${config.dlmmBuywall.direction}\n` +
+        `Single-side threshold: ${(config.dlmmBuywall.singleSideThreshold * 100).toFixed(0)}%\n` +
+        `Walls tracked: ${count}`,
+      { parse_mode: "HTML" }
+    );
+  });
 }
 
-/**
- * Main entry point.
- */
 async function main(): Promise<void> {
-  logger.info("=== Meteora DAMM v2 Alert Bot ===");
+  logger.info("=== Meteora DAMM v2 Pool Tailer ===");
   logger.info("Starting up...");
 
   // Validate wallet
@@ -274,11 +371,25 @@ async function main(): Promise<void> {
 
   // Initialize Telegram bot
   telegramBot = new TelegramBot();
-  telegramBot.onAlert(handleAlert);
   registerAdminCommands();
-
-  // Start bot
   await telegramBot.start();
+
+  // Start pool listener (WebSocket)
+  poolListener = new PoolListener();
+  poolListener.onPoolDetected(handleNewPool);
+  poolListener.start();
+
+  if (config.dlmmBuywall.enabled) {
+    dlmmListener = new DlmmPositionListener();
+    dlmmListener.onPositionSnapshot(handleDlmmBuyWall);
+    dlmmListener.start();
+    logger.info("DLMM buy wall tracker enabled", {
+      minSol: config.dlmmBuywall.minSol,
+      direction: config.dlmmBuywall.direction,
+    });
+  } else {
+    logger.info("DLMM buy wall tracker disabled (DLMM_BUYWALL_ENABLED=true)");
+  }
 
   // Start position monitor
   startMonitor();
@@ -286,6 +397,8 @@ async function main(): Promise<void> {
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info(`Received ${signal}, shutting down...`);
+    poolListener.stop();
+    if (dlmmListener) dlmmListener.stop();
     stopMonitor();
     await telegramBot.stop();
     process.exit(0);
@@ -294,7 +407,7 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-  logger.info("Bot is running. Waiting for alerts...");
+  logger.info("Pool Tailer running. Watching for new DAMM v2 pools...");
 }
 
 main().catch((err) => {
